@@ -160,6 +160,42 @@ describe("model state operations", () => {
     expect(loadAborted).toBe(true);
   });
 
+  test("accepts a stable exact context when only the load response hangs", async () => {
+    let loadAborted = false;
+    const exact = qwenModel({
+      loadedInstances: [{ id: "stable-exact", contextLength: 65_536 }],
+    });
+
+    const result = await ensureModelLoaded(
+      {
+        unloadInstance: async (id) => id,
+        loadModel: async (_model, _context, signal) =>
+          await new Promise<{ instanceId: string }>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                loadAborted = true;
+                reject(new Error("cancelled"));
+              },
+              { once: true },
+            );
+          }),
+        listModels: async () => [exact],
+      },
+      qwenModel(),
+      65_536,
+      undefined,
+      { pollIntervalMs: 0, exactContextStabilityMs: 0 },
+    );
+
+    expect(result).toEqual({
+      instanceId: "stable-exact",
+      models: [exact],
+      reloaded: false,
+    });
+    expect(loadAborted).toBe(true);
+  });
+
   test("cleans up a mismatched context echoed by a completed load response", async () => {
     const unloaded: string[] = [];
     let listCalls = 0;
@@ -193,6 +229,41 @@ describe("model state operations", () => {
       message: expect.stringContaining("mismatched instance was unloaded"),
     });
     expect(unloaded).toEqual(["echoed-wrong-context"]);
+  });
+
+  test("mismatch cleanup preserves an exact-context instance", async () => {
+    const unloaded: string[] = [];
+    let listCalls = 0;
+    const mixed = qwenModel({
+      loadedInstances: [
+        { id: "keep-exact", contextLength: 65_536 },
+        { id: "remove-wrong", contextLength: 258_816 },
+      ],
+    });
+    const exactOnly = qwenModel({
+      loadedInstances: [{ id: "keep-exact", contextLength: 65_536 }],
+    });
+
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => {
+            unloaded.push(id);
+            return id;
+          },
+          loadModel: async () => {
+            throw new LmStudioError("unsupported-context", "wrong context");
+          },
+          listModels: async () => {
+            listCalls += 1;
+            return listCalls === 1 ? [mixed] : [exactOnly];
+          },
+        },
+        qwenModel(),
+        65_536,
+      ),
+    ).rejects.toMatchObject({ kind: "unsupported-context" });
+    expect(unloaded).toEqual(["remove-wrong"]);
   });
 
   test("caller cancellation stops a pending load and inventory watcher", async () => {

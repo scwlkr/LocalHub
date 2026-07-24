@@ -175,10 +175,10 @@ test("quit cancels refresh and waits for renderer teardown", async () => {
   }
 });
 
-test("Enter visibly starts loading in an 80-column terminal", async () => {
+test("Enter visibly starts loading in an 80-by-20 terminal", async () => {
   const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({
     width: 80,
-    height: 24,
+    height: 20,
   });
   let markReady: (() => void) | undefined;
   const ready = new Promise<void>((resolve) => {

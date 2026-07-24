@@ -61,6 +61,7 @@ export interface LoadOutcome {
 
 export interface EnsureModelLoadedOptions {
   pollIntervalMs?: number;
+  exactContextStabilityMs?: number;
 }
 
 interface ModelClient {
@@ -119,6 +120,7 @@ export async function ensureModelLoaded(
     }
   }
   signal?.throwIfAborted();
+  const pollIntervalMs = Math.max(0, options.pollIntervalMs ?? 500);
   const operation = new AbortController();
   const abortOperation = (): void => operation.abort();
   if (signal?.aborted) {
@@ -136,10 +138,11 @@ export async function ensureModelLoaded(
     client,
     model.key,
     contextLength,
-    Math.max(0, options.pollIntervalMs ?? 500),
+    pollIntervalMs,
+    Math.max(0, options.exactContextStabilityMs ?? 60_000),
     operation.signal,
   ).then(
-    (observedModel) => ({ kind: "observed", model: observedModel }),
+    (observation) => ({ kind: "observed", observation }),
     (error: unknown) => ({ kind: "observation-error", error }),
   );
 
@@ -155,8 +158,15 @@ export async function ensureModelLoaded(
     if (winner.error instanceof LmStudioError && winner.error.kind === "unsupported-context") {
       const models = await client.listModels(signal).catch(() => []);
       const loadedModel = models.find((candidate) => candidate.key === model.key);
-      if (loadedModel && loadedModel.loadedInstances.length > 0) {
-        const unloaded = await unloadUnexpectedInstances(client, loadedModel, signal);
+      if (
+        loadedModel?.loadedInstances.some((instance) => instance.contextLength !== contextLength)
+      ) {
+        const unloaded = await unloadUnexpectedInstances(
+          client,
+          loadedModel,
+          contextLength,
+          signal,
+        );
         throw contextMismatchError(model, loadedModel, contextLength, unloaded);
       }
     }
@@ -166,8 +176,35 @@ export async function ensureModelLoaded(
     throw winner.error;
   }
   if (winner.kind === "observed") {
-    const unloaded = await unloadUnexpectedInstances(client, winner.model, signal);
-    throw contextMismatchError(model, winner.model, contextLength, unloaded);
+    const observation = winner.observation;
+    if (observation.kind === "mismatch") {
+      const unloaded = await unloadUnexpectedInstances(
+        client,
+        observation.model,
+        contextLength,
+        signal,
+      );
+      throw contextMismatchError(model, observation.model, contextLength, unloaded);
+    }
+    await abortableDelay(pollIntervalMs, signal);
+    const models = await client.listModels(signal);
+    const verified = models
+      .find((candidate) => candidate.key === model.key)
+      ?.loadedInstances.find(
+        (instance) =>
+          instance.id === observation.instanceId && instance.contextLength === contextLength,
+      );
+    if (!verified) {
+      throw new LmStudioError(
+        "invalid-response",
+        `LM Studio removed ${observation.instanceId} after its load request was stopped; update LM Studio or its model runtime, then retry.`,
+      );
+    }
+    return {
+      instanceId: verified.id,
+      models,
+      reloaded: model.loadedInstances.length > 0,
+    };
   }
 
   const loaded = winner.loaded;
@@ -188,26 +225,49 @@ export async function ensureModelLoaded(
 type LoadRaceResult =
   | { kind: "loaded"; loaded: { instanceId: string } }
   | { kind: "load-error"; error: unknown }
-  | { kind: "observed"; model: ModelInfo }
+  | { kind: "observed"; observation: LoadObservation }
   | { kind: "observation-error"; error: unknown };
+
+type LoadObservation =
+  | { kind: "mismatch"; model: ModelInfo }
+  | { kind: "exact"; instanceId: string };
 
 async function observeLoadedModel(
   client: ModelClient,
   modelKey: string,
   contextLength: number,
   intervalMs: number,
+  exactContextStabilityMs: number,
   signal: AbortSignal,
-): Promise<ModelInfo> {
+): Promise<LoadObservation> {
+  let exactCandidateId: string | null = null;
+  let exactFirstSeenAt = 0;
   while (true) {
     await abortableDelay(intervalMs, signal);
     try {
       const models = await client.listModels(signal);
       const model = models.find((candidate) => candidate.key === modelKey);
-      const hasExactContext = model?.loadedInstances.some(
+      const exact = model?.loadedInstances.find(
         (instance) => instance.contextLength === contextLength,
       );
-      if (model && model.loadedInstances.length > 0 && !hasExactContext) {
-        return model;
+      const hasMismatch = model?.loadedInstances.some(
+        (instance) => instance.contextLength !== contextLength,
+      );
+      if (model && hasMismatch) {
+        return { kind: "mismatch", model };
+      }
+      if (!exact) {
+        exactCandidateId = null;
+        continue;
+      }
+      const now = Date.now();
+      if (exactCandidateId === exact.id) {
+        if (now - exactFirstSeenAt >= exactContextStabilityMs) {
+          return { kind: "exact", instanceId: exact.id };
+        }
+      } else {
+        exactCandidateId = exact.id;
+        exactFirstSeenAt = now;
       }
     } catch (error) {
       if (signal.aborted) {
@@ -220,9 +280,12 @@ async function observeLoadedModel(
 async function unloadUnexpectedInstances(
   client: ModelClient,
   model: ModelInfo,
+  contextLength: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
-  for (const instance of model.loadedInstances) {
+  for (const instance of model.loadedInstances.filter(
+    (candidate) => candidate.contextLength !== contextLength,
+  )) {
     try {
       await client.unloadInstance(instance.id, signal);
     } catch {
@@ -231,9 +294,9 @@ async function unloadUnexpectedInstances(
   }
   try {
     const models = await client.listModels(signal);
-    return (
-      (models.find((candidate) => candidate.key === model.key)?.loadedInstances.length ?? 0) === 0
-    );
+    return !models
+      .find((candidate) => candidate.key === model.key)
+      ?.loadedInstances.some((instance) => instance.contextLength !== contextLength);
   } catch {
     return false;
   }
@@ -247,7 +310,9 @@ function contextMismatchError(
 ): LmStudioError {
   const contexts = [
     ...new Set(
-      loadedModel.loadedInstances.map((instance) => instance.contextLength.toLocaleString("en-US")),
+      loadedModel.loadedInstances
+        .filter((instance) => instance.contextLength !== contextLength)
+        .map((instance) => instance.contextLength.toLocaleString("en-US")),
     ),
   ].join(", ");
   const cleanup = unloaded
@@ -259,22 +324,22 @@ function contextMismatchError(
   );
 }
 
-function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const finish = (): void => {
-      signal.removeEventListener("abort", cancel);
+      signal?.removeEventListener("abort", cancel);
       resolve();
     };
     const cancel = (): void => {
       clearTimeout(timer);
-      signal.removeEventListener("abort", cancel);
+      signal?.removeEventListener("abort", cancel);
       reject(new LmStudioError("cancelled", "LM Studio operation cancelled."));
     };
     const timer = setTimeout(finish, milliseconds);
-    if (signal.aborted) {
+    if (signal?.aborted) {
       cancel();
     } else {
-      signal.addEventListener("abort", cancel, { once: true });
+      signal?.addEventListener("abort", cancel, { once: true });
     }
   });
 }

@@ -31,7 +31,9 @@ export type TuiResult =
     };
 
 export interface TuiLayout {
+  stateBox: BoxRenderable;
   summary: TextRenderable;
+  modelsBox: BoxRenderable;
   models: SelectRenderable;
   detailsBox: ScrollBoxRenderable;
   details: TextRenderable;
@@ -133,14 +135,39 @@ export function createTuiLayout(renderer: CliRenderer): TuiLayout {
   renderer.root.add(root);
   models.focus();
 
-  return {
+  const layout = {
+    stateBox,
     summary,
+    modelsBox,
     models,
     detailsBox,
     details,
     footer,
     modelOptionsSignature: "",
   };
+  resizeTuiLayout(layout, renderer.height);
+  renderer.on("resize", (_width: number, height: number) => {
+    resizeTuiLayout(layout, height);
+  });
+  return layout;
+}
+
+function resizeTuiLayout(layout: TuiLayout, terminalHeight: number): void {
+  if (terminalHeight <= 18) {
+    layout.stateBox.height = 4;
+    layout.modelsBox.minHeight = 3;
+    layout.detailsBox.height = 5;
+    return;
+  }
+  if (terminalHeight <= 22) {
+    layout.stateBox.height = 5;
+    layout.modelsBox.minHeight = 3;
+    layout.detailsBox.height = 7;
+    return;
+  }
+  layout.stateBox.height = 7;
+  layout.modelsBox.minHeight = 4;
+  layout.detailsBox.height = 9;
 }
 
 export function updateTuiLayout(
