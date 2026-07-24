@@ -1,5 +1,5 @@
 import { type LmStudioClient, LmStudioError } from "./lmstudio.ts";
-import { type ResolvedRoute, resolveRoute } from "./routing.ts";
+import { resolveRoute } from "./routing.ts";
 import { collectSystemInfo, findCodex } from "./system.ts";
 import type { ActiveRoute, LocalHubConfig, ModelInfo, RouteAttempt, SystemInfo } from "./types.ts";
 
@@ -70,7 +70,19 @@ export async function ensureModelLoaded(
 ): Promise<LoadOutcome> {
   const ready = model.loadedInstances.find((instance) => instance.contextLength === contextLength);
   if (ready) {
-    return { instanceId: ready.id, models: await client.listModels(), reloaded: false };
+    const models = await client.listModels();
+    const verified = models
+      .find((candidate) => candidate.key === model.key)
+      ?.loadedInstances.find(
+        (instance) => instance.id === ready.id && instance.contextLength === contextLength,
+      );
+    if (verified) {
+      return { instanceId: verified.id, models, reloaded: false };
+    }
+    throw new LmStudioError(
+      "invalid-response",
+      `LM Studio no longer reports ${ready.id} at ${contextLength} tokens; refresh and retry.`,
+    );
   }
 
   for (const instance of model.loadedInstances) {
@@ -104,8 +116,4 @@ export async function unloadModel(client: ModelClient, model: ModelInfo): Promis
     );
   }
   return models;
-}
-
-export function withModels(route: ResolvedRoute, models: ModelInfo[]): ResolvedRoute {
-  return { ...route, models };
 }

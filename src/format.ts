@@ -2,7 +2,7 @@ export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) {
     return "unknown";
   }
-  const units = ["B", "KiB", "GiB", "TiB"];
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
   let value = bytes;
   let index = 0;
   while (value >= 1024 && index < units.length - 1) {

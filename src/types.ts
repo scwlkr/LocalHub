@@ -88,7 +88,7 @@ export interface SystemInfo {
   hostname: string;
   cpu: string;
   totalMemoryBytes: number;
-  freeMemoryBytes: number;
+  freeMemoryBytes: number | null;
   cwd: string;
 }
 

@@ -35,11 +35,15 @@ describe("Codex process construction", () => {
       contextLength: 65_536,
       cwd: "C:\\repo",
       token: "super-secret",
-      baseEnv: {},
+      sourceTokenEnv: "PRIVATE_LM_KEY",
+      baseEnv: { PRIVATE_LM_KEY: "super-secret" },
     });
     expect(spec.command.join(" ")).not.toContain("super-secret");
     expect(spec.command.join(" ")).toContain('env_key="LOCALHUB_LMSTUDIO_TOKEN"');
+    expect(spec.command.join(" ")).toContain('service_tier="default"');
+    expect(spec.command.join(" ")).toContain('web_search="disabled"');
     expect(spec.env.LOCALHUB_LMSTUDIO_TOKEN).toBe("super-secret");
+    expect(spec.env.PRIVATE_LM_KEY).toBeUndefined();
   });
 
   test("inherits the terminal and returns Codex's exit code", async () => {

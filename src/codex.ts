@@ -14,6 +14,7 @@ export interface CodexProcessOptions {
   contextLength: number;
   cwd: string;
   token?: string;
+  sourceTokenEnv?: string;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -55,9 +56,18 @@ export function buildCodexProcess(options: CodexProcessOptions): CodexProcessSpe
     "--config",
     `model_context_window=${options.contextLength}`,
     "--config",
+    'service_tier="default"',
+    "--config",
+    "features.fast_mode=false",
+    "--config",
+    'web_search="disabled"',
+    "--config",
     `model_providers.${PROVIDER_ID}=${toTomlInlineTable(provider)}`,
   ];
   const env: Record<string, string | undefined> = { ...(options.baseEnv ?? process.env) };
+  if (options.sourceTokenEnv) {
+    delete env[options.sourceTokenEnv];
+  }
   if (options.token) {
     env[CHILD_TOKEN_ENV] = options.token;
   } else {

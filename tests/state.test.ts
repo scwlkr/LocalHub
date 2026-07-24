@@ -10,7 +10,7 @@ const snapshot: RuntimeSnapshot = {
     hostname: "mac",
     cpu: "Apple",
     totalMemoryBytes: 64,
-    freeMemoryBytes: 32,
+    freeMemoryBytes: null,
     cwd: "/project",
   },
   codexPath: "/bin/codex",

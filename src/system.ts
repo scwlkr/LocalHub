@@ -2,13 +2,14 @@ import { arch, cpus, freemem, hostname, platform, totalmem } from "node:os";
 import type { SystemInfo } from "./types.ts";
 
 export function collectSystemInfo(cwd = process.cwd()): SystemInfo {
+  const currentPlatform = platform();
   return {
-    platform: platform(),
+    platform: currentPlatform,
     arch: arch(),
     hostname: hostname(),
     cpu: cpus()[0]?.model ?? "unknown",
     totalMemoryBytes: totalmem(),
-    freeMemoryBytes: freemem(),
+    freeMemoryBytes: currentPlatform === "darwin" ? null : freemem(),
     cwd,
   };
 }
