@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { LmStudioError } from "../src/lmstudio.ts";
 import { ensureModelLoaded, unloadModel } from "../src/runtime.ts";
 import { qwenModel } from "./fixtures.ts";
 
@@ -39,6 +40,7 @@ describe("model state operations", () => {
       loadedInstances: [{ id: "new", contextLength: 65_536 }],
     });
     const calls: string[] = [];
+    let listCalls = 0;
     const result = await ensureModelLoaded(
       {
         unloadInstance: async (id) => {
@@ -51,7 +53,8 @@ describe("model state operations", () => {
         },
         listModels: async () => {
           calls.push("list");
-          return [refreshed];
+          listCalls += 1;
+          return listCalls === 1 ? [qwenModel()] : [refreshed];
         },
       },
       original,
@@ -62,7 +65,188 @@ describe("model state operations", () => {
       models: [refreshed],
       reloaded: true,
     });
-    expect(calls).toEqual(["unload:old", "load:65536", "list"]);
+    expect(calls).toEqual(["unload:old", "list", "load:65536", "list"]);
+  });
+
+  test("stops a hung load when runtime inventory reports a mismatched context", async () => {
+    const calls: string[] = [];
+    let loadAborted = false;
+    let listCalls = 0;
+    const wrongContext = qwenModel({
+      loadedInstances: [{ id: "wrong-context", contextLength: 258_816 }],
+    });
+
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => {
+            calls.push(`unload:${id}`);
+            return id;
+          },
+          loadModel: async (_model, _context, signal) =>
+            await new Promise<{ instanceId: string }>((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  loadAborted = true;
+                  reject(new Error("cancelled"));
+                },
+                { once: true },
+              );
+            }),
+          listModels: async () => {
+            listCalls += 1;
+            return listCalls === 1 ? [wrongContext] : [qwenModel()];
+          },
+        },
+        qwenModel(),
+        65_536,
+        undefined,
+        { pollIntervalMs: 0 },
+      ),
+    ).rejects.toMatchObject({
+      kind: "unsupported-context",
+      message: expect.stringContaining("258,816 instead of 65,536"),
+    });
+    expect(loadAborted).toBe(true);
+    expect(calls).toEqual(["unload:wrong-context"]);
+  });
+
+  test("does not trust a provisional exact context while the load response hangs", async () => {
+    let listCalls = 0;
+    let loadAborted = false;
+    const provisional = qwenModel({
+      loadedInstances: [{ id: "provisional", contextLength: 65_536 }],
+    });
+    const wrongContext = qwenModel({
+      loadedInstances: [{ id: "auto-fitted", contextLength: 258_816 }],
+    });
+
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => id,
+          loadModel: async (_model, _context, signal) =>
+            await new Promise<{ instanceId: string }>((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  loadAborted = true;
+                  reject(new Error("cancelled"));
+                },
+                { once: true },
+              );
+            }),
+          listModels: async () => {
+            listCalls += 1;
+            if (listCalls === 1) {
+              return [provisional];
+            }
+            if (listCalls === 2) {
+              return [wrongContext];
+            }
+            return [qwenModel()];
+          },
+        },
+        qwenModel(),
+        65_536,
+        undefined,
+        { pollIntervalMs: 0 },
+      ),
+    ).rejects.toMatchObject({
+      kind: "unsupported-context",
+      message: expect.stringContaining("258,816 instead of 65,536"),
+    });
+    expect(loadAborted).toBe(true);
+  });
+
+  test("cleans up a mismatched context echoed by a completed load response", async () => {
+    const unloaded: string[] = [];
+    let listCalls = 0;
+    const wrongContext = qwenModel({
+      loadedInstances: [{ id: "echoed-wrong-context", contextLength: 258_816 }],
+    });
+
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => {
+            unloaded.push(id);
+            return id;
+          },
+          loadModel: async () => {
+            throw new LmStudioError(
+              "unsupported-context",
+              "LM Studio loaded 258816 instead of 65536.",
+            );
+          },
+          listModels: async () => {
+            listCalls += 1;
+            return listCalls === 1 ? [wrongContext] : [qwenModel()];
+          },
+        },
+        qwenModel(),
+        65_536,
+      ),
+    ).rejects.toMatchObject({
+      kind: "unsupported-context",
+      message: expect.stringContaining("mismatched instance was unloaded"),
+    });
+    expect(unloaded).toEqual(["echoed-wrong-context"]);
+  });
+
+  test("caller cancellation stops a pending load and inventory watcher", async () => {
+    const controller = new AbortController();
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const result = ensureModelLoaded(
+      {
+        unloadInstance: async (id) => id,
+        loadModel: async (_model, _context, signal) =>
+          await new Promise<{ instanceId: string }>((_resolve, reject) => {
+            markStarted?.();
+            signal?.addEventListener(
+              "abort",
+              () => reject(new LmStudioError("cancelled", "cancelled")),
+              { once: true },
+            );
+          }),
+        listModels: async () => [],
+      },
+      qwenModel(),
+      65_536,
+      controller.signal,
+      { pollIntervalMs: 10_000 },
+    );
+
+    await started;
+    controller.abort();
+    await expect(result).rejects.toMatchObject({ kind: "cancelled" });
+  });
+
+  test("does not start a reload while an old instance still appears loaded", async () => {
+    const original = qwenModel({
+      loadedInstances: [{ id: "stale", contextLength: 8_192 }],
+    });
+    let loaded = false;
+
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => id,
+          loadModel: async () => {
+            loaded = true;
+            return { instanceId: "new" };
+          },
+          listModels: async () => [original],
+        },
+        original,
+        65_536,
+      ),
+    ).rejects.toThrow("still reports Qwen3.6 35B A3B loaded");
+    expect(loaded).toBe(false);
   });
 
   test("rejects unsupported context before unloading a working instance", async () => {

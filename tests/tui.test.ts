@@ -47,8 +47,8 @@ test("OpenTUI layout renders runtime Qwen details and all action hints", async (
     expect(frame).toContain("qwen/qwen3.6-35b-a3b");
     expect(frame).toContain("65,536");
     expect(frame).toContain("default on");
-    expect(frame).toContain("load/reload");
-    expect(frame).toContain("diagnostics");
+    expect(frame).toContain("l load");
+    expect(frame).toContain("d diag");
   } finally {
     renderer.destroy();
   }
@@ -172,6 +172,58 @@ test("quit cancels refresh and waits for renderer teardown", async () => {
   } finally {
     renderer.destroy = originalDestroy;
     originalDestroy();
+  }
+});
+
+test("Enter visibly starts loading in an 80-column terminal", async () => {
+  const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({
+    width: 80,
+    height: 24,
+  });
+  let markReady: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  let markLoading: (() => void) | undefined;
+  const loading = new Promise<void>((resolve) => {
+    markLoading = resolve;
+  });
+  try {
+    const resultPromise = runTui(defaultConfig(), "/tmp/config.json", {
+      createRenderer: async () => renderer,
+      collect: async () => {
+        markReady?.();
+        return {
+          snapshot: runtimeSnapshot([qwenModel()]),
+          client: {} as RuntimeContext["client"],
+        };
+      },
+      ensureLoaded: async (_client, _model, _context, signal) => {
+        markLoading?.();
+        return await new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("cancelled")), {
+            once: true,
+          });
+        });
+      },
+    });
+
+    await ready;
+    await Bun.sleep(0);
+    renderer.keyInput.emit("keypress", { name: "return", ctrl: false } as KeyEvent);
+    await loading;
+    await renderOnce();
+    const frame = captureCharFrame();
+
+    expect(frame).toContain("Loading Qwen3.6 35B A3B at 65,536 tokens");
+    expect(frame).toContain("busy · q cancels");
+
+    renderer.keyInput.emit("keypress", { name: "q", ctrl: false } as KeyEvent);
+    expect(await resultPromise).toEqual({ kind: "quit" });
+  } finally {
+    if (!renderer.isDestroyed) {
+      renderer.destroy();
+    }
   }
 });
 

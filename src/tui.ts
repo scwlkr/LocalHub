@@ -177,12 +177,12 @@ export function updateTuiLayout(
   } else {
     layout.models.focus();
   }
-  const busy = state.phase === "busy" ? " [busy]" : "";
+  const busy = state.phase === "busy" ? " [busy · q cancels]" : "";
   layout.footer.content = [
-    showDiagnostics
-      ? "↑/↓ or j/k scroll diagnostics · d close · l load/reload · u unload · r refresh · q quit"
-      : "↑/↓ select · Enter/c launch · l load/reload · u unload · r refresh · d diagnostics · q quit",
     `${state.message}${busy}`,
+    showDiagnostics
+      ? "↑↓/jk scroll · d close · l load · u unload · r refresh · q quit"
+      : "↑↓/jk · Enter/c launch · l load · u unload · r refresh · d diag · q quit",
   ].join("\n");
 }
 
