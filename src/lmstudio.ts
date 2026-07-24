@@ -45,12 +45,16 @@ export class LmStudioClient {
     this.#timeoutMs = options.timeoutMs ?? 4_000;
   }
 
-  async listModels(): Promise<ModelInfo[]> {
-    const body = await this.#request("/api/v1/models", { method: "GET" });
+  async listModels(signal?: AbortSignal): Promise<ModelInfo[]> {
+    const body = await this.#request("/api/v1/models", { method: "GET" }, this.#timeoutMs, signal);
     return parseModelsResponse(body);
   }
 
-  async loadModel(model: ModelInfo, contextLength: number): Promise<LoadResult> {
+  async loadModel(
+    model: ModelInfo,
+    contextLength: number,
+    signal?: AbortSignal,
+  ): Promise<LoadResult> {
     if (model.type !== "llm") {
       throw new LmStudioError("http", `${model.displayName} is not an LLM.`);
     }
@@ -72,11 +76,12 @@ export class LmStudioClient {
         }),
       },
       600_000,
+      signal,
     );
     return parseLoadResponse(body, contextLength);
   }
 
-  async unloadInstance(instanceId: string): Promise<string> {
+  async unloadInstance(instanceId: string, signal?: AbortSignal): Promise<string> {
     const body = await this.#request(
       "/api/v1/models/unload",
       {
@@ -84,6 +89,7 @@ export class LmStudioClient {
         body: JSON.stringify({ instance_id: instanceId }),
       },
       60_000,
+      signal,
     );
     if (!isObject(body) || typeof body.instance_id !== "string") {
       throw new LmStudioError("invalid-response", "LM Studio returned an invalid unload response.");
@@ -91,9 +97,31 @@ export class LmStudioClient {
     return body.instance_id;
   }
 
-  async #request(path: string, init: RequestInit, timeoutMs = this.#timeoutMs): Promise<unknown> {
+  async #request(
+    path: string,
+    init: RequestInit,
+    timeoutMs = this.#timeoutMs,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const abortFromCaller = (): void => controller.abort();
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const rejectOnAbort = (): void => reject(new Error("request aborted"));
+      controller.signal.addEventListener("abort", rejectOnAbort, { once: true });
+      if (controller.signal.aborted) {
+        rejectOnAbort();
+      }
+    });
+    if (signal?.aborted) {
+      controller.abort();
+    } else {
+      signal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (init.body !== undefined) {
@@ -106,20 +134,29 @@ export class LmStudioClient {
     let response: Response;
     let text: string;
     try {
-      response = await this.#fetch(`${this.endpoint}${path}`, {
-        ...init,
-        headers,
-        signal: controller.signal,
-      });
-      text = await response.text();
+      ({ response, text } = await Promise.race([
+        (async () => {
+          const fetched = await this.#fetch(`${this.endpoint}${path}`, {
+            ...init,
+            headers,
+            signal: controller.signal,
+          });
+          return { response: fetched, text: await fetched.text() };
+        })(),
+        aborted,
+      ]));
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (signal?.aborted) {
+        throw new LmStudioError("cancelled", "LM Studio operation cancelled.");
+      }
+      if (timedOut) {
         throw new LmStudioError("timeout", `LM Studio did not respond within ${timeoutMs} ms.`);
       }
       const kind = classifyNetworkError(error);
       throw new LmStudioError(kind, networkErrorMessage(kind, error));
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abortFromCaller);
     }
 
     if (!response.ok) {

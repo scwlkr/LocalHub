@@ -39,6 +39,14 @@ export interface TuiLayout {
   modelOptionsSignature: string;
 }
 
+export interface TuiDependencies {
+  createRenderer?: typeof createCliRenderer;
+  collect?: typeof collectRuntime;
+  ensureLoaded?: typeof ensureModelLoaded;
+  unload?: typeof unloadModel;
+  saveSelection?: typeof saveSelectedModel;
+}
+
 export function createTuiLayout(renderer: CliRenderer): TuiLayout {
   const root = new BoxRenderable(renderer, {
     id: "layout",
@@ -177,8 +185,17 @@ export function updateTuiLayout(
   ].join("\n");
 }
 
-export async function runTui(config: LocalHubConfig, configFile: string): Promise<TuiResult> {
-  const renderer = await createCliRenderer({
+export async function runTui(
+  config: LocalHubConfig,
+  configFile: string,
+  dependencies: TuiDependencies = {},
+): Promise<TuiResult> {
+  const createRenderer = dependencies.createRenderer ?? createCliRenderer;
+  const collect = dependencies.collect ?? collectRuntime;
+  const ensureLoaded = dependencies.ensureLoaded ?? ensureModelLoaded;
+  const unloadSelected = dependencies.unload ?? unloadModel;
+  const saveSelection = dependencies.saveSelection ?? saveSelectedModel;
+  const renderer = await createRenderer({
     screenMode: "alternate-screen",
     exitOnCtrlC: false,
     clearOnShutdown: true,
@@ -191,6 +208,8 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
   let runtime: RuntimeContext | null = null;
   let showDiagnostics = false;
   let settled = false;
+  let stopping = false;
+  let activeController: AbortController | null = null;
 
   const dispatch = (event: TuiEvent): void => {
     state = reduceTuiState(state, event);
@@ -203,20 +222,33 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
     ) ?? null;
 
   const refresh = async (): Promise<void> => {
-    if (state.phase === "busy") {
+    if (state.phase === "busy" || stopping) {
       return;
     }
     dispatch({ type: "refresh-started" });
+    const controller = new AbortController();
+    activeController = controller;
     try {
-      runtime = await collectRuntime(config);
+      const collected = await collect(config, { signal: controller.signal });
+      if (stopping || controller.signal.aborted) {
+        return;
+      }
+      runtime = collected;
       dispatch({ type: "refresh-succeeded", snapshot: runtime.snapshot });
     } catch (error) {
+      if (stopping || controller.signal.aborted) {
+        return;
+      }
       dispatch({ type: "failed", message: errorMessage(error) });
+    } finally {
+      if (activeController === controller) {
+        activeController = null;
+      }
     }
   };
 
   const load = async (): Promise<string | null> => {
-    if (state.phase === "busy") {
+    if (state.phase === "busy" || stopping) {
       return null;
     }
     const model = selectedModel();
@@ -232,24 +264,52 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
       operation: "load",
       message: `Loading ${model.displayName} at ${config.contextLength.toLocaleString("en-US")} tokens…`,
     });
+    const controller = new AbortController();
+    activeController = controller;
     try {
-      const outcome = await ensureModelLoaded(runtime.client, model, config.contextLength);
+      const outcome = await ensureLoaded(
+        runtime.client,
+        model,
+        config.contextLength,
+        controller.signal,
+      );
+      if (stopping || controller.signal.aborted) {
+        return null;
+      }
       runtime.snapshot = { ...runtime.snapshot, models: outcome.models };
-      await saveSelectedModel(model.key, config, configFile);
+      let persistenceWarning = "";
+      try {
+        await saveSelection(model.key, config, configFile, controller.signal);
+      } catch (error) {
+        if (stopping || controller.signal.aborted) {
+          return null;
+        }
+        persistenceWarning = ` Preference not saved: ${errorMessage(error)}.`;
+      }
+      if (stopping || controller.signal.aborted) {
+        return null;
+      }
       dispatch({
         type: "models-updated",
         snapshot: runtime.snapshot,
-        message: `${outcome.reloaded ? "Reloaded" : "Loaded"} ${model.displayName} at ${config.contextLength.toLocaleString("en-US")} tokens.`,
+        message: `${outcome.reloaded ? "Reloaded" : "Loaded"} ${model.displayName} at ${config.contextLength.toLocaleString("en-US")} tokens.${persistenceWarning}`,
       });
       return outcome.instanceId;
     } catch (error) {
+      if (stopping || controller.signal.aborted) {
+        return null;
+      }
       dispatch({ type: "failed", message: errorMessage(error) });
       return null;
+    } finally {
+      if (activeController === controller) {
+        activeController = null;
+      }
     }
   };
 
   const unload = async (): Promise<void> => {
-    if (state.phase === "busy") {
+    if (state.phase === "busy" || stopping) {
       return;
     }
     const model = selectedModel();
@@ -270,10 +330,16 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
       operation: "unload",
       message: `Unloading ${model.displayName}…`,
     });
+    const controller = new AbortController();
+    activeController = controller;
     try {
+      const models = await unloadSelected(runtime.client, model, controller.signal);
+      if (stopping || controller.signal.aborted) {
+        return;
+      }
       runtime.snapshot = {
         ...runtime.snapshot,
-        models: await unloadModel(runtime.client, model),
+        models,
       };
       dispatch({
         type: "models-updated",
@@ -281,22 +347,35 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
         message: `Unloaded ${model.displayName}.`,
       });
     } catch (error) {
+      if (stopping || controller.signal.aborted) {
+        return;
+      }
       dispatch({ type: "failed", message: errorMessage(error) });
+    } finally {
+      if (activeController === controller) {
+        activeController = null;
+      }
     }
   };
 
   updateTuiLayout(layout, state, config, showDiagnostics);
 
   return await new Promise<TuiResult>((resolve) => {
+    let pendingResult: TuiResult | null = null;
+
     const finish = (result: TuiResult): void => {
-      if (settled) {
+      if (settled || stopping) {
         return;
       }
-      settled = true;
+      stopping = true;
+      pendingResult = result;
+      activeController?.abort();
       if (!renderer.isDestroyed) {
         renderer.destroy();
+      } else {
+        settled = true;
+        resolve(result);
       }
-      resolve(result);
     };
 
     const launch = async (): Promise<void> => {
@@ -363,7 +442,9 @@ export async function runTui(config: LocalHubConfig, configFile: string): Promis
     renderer.once("destroy", () => {
       if (!settled) {
         settled = true;
-        resolve({ kind: "quit" });
+        stopping = true;
+        activeController?.abort();
+        resolve(pendingResult ?? { kind: "quit" });
       }
     });
 

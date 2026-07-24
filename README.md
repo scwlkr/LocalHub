@@ -81,11 +81,16 @@ it only on a trusted LAN. See [SECURITY.md](SECURITY.md).
 | --- | --- | --- |
 | macOS | `localEndpoint` only | Anonymous first; retries with `tokenEnv` after an authentication response |
 | Windows | `localEndpoint` first (local LM Studio or LM Link) | Anonymous first; retries with `tokenEnv` after an authentication response |
-| Windows fallback | `lanEndpoint`, when configured | Token required before any request |
+| Windows fallback | `lanEndpoint`, when local is unavailable or lacks the usable/preferred LLM | Token must be present; anonymous security probe must be rejected before the bearer request |
 
 A successful model inventory request is the server-health check. LocalHub
 reports authentication, DNS, firewall, host, HTTP, timeout, malformed-response,
 and unsupported-context failures with a focused fix.
+
+For direct LAN, LocalHub requires the configured token in the environment,
+first verifies that an anonymous request receives `401` or `403`, and only then
+sends the bearer token. If the server accepts the anonymous probe, LocalHub
+refuses the route and tells you to enable **Require Authentication**.
 
 LM Link does not identify the actual inference device in the REST response, so
 LocalHub cannot prove which linked machine served a request. Set the Mac as the

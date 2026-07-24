@@ -25,6 +25,7 @@ export async function collectRuntime(
     hostname?: string;
     resolve?: typeof resolveRoute;
     which?: (command: string) => string | null;
+    signal?: AbortSignal;
   } = {},
 ): Promise<RuntimeContext> {
   const system = collectSystemInfo(options.cwd);
@@ -35,6 +36,7 @@ export async function collectRuntime(
       hostname: options.hostname ?? system.hostname,
       ...(options.platform === undefined ? {} : { platform: options.platform }),
       ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     }),
     Promise.resolve(findCodex(options.which)),
   ]);
@@ -58,15 +60,20 @@ export interface LoadOutcome {
 }
 
 interface ModelClient {
-  loadModel(model: ModelInfo, contextLength: number): Promise<{ instanceId: string }>;
-  unloadInstance(instanceId: string): Promise<string>;
-  listModels(): Promise<ModelInfo[]>;
+  loadModel(
+    model: ModelInfo,
+    contextLength: number,
+    signal?: AbortSignal,
+  ): Promise<{ instanceId: string }>;
+  unloadInstance(instanceId: string, signal?: AbortSignal): Promise<string>;
+  listModels(signal?: AbortSignal): Promise<ModelInfo[]>;
 }
 
 export async function ensureModelLoaded(
   client: ModelClient,
   model: ModelInfo,
   contextLength: number,
+  signal?: AbortSignal,
 ): Promise<LoadOutcome> {
   if (model.maxContextLength < contextLength) {
     throw new LmStudioError(
@@ -76,7 +83,7 @@ export async function ensureModelLoaded(
   }
   const ready = model.loadedInstances.find((instance) => instance.contextLength === contextLength);
   if (ready) {
-    const models = await client.listModels();
+    const models = await client.listModels(signal);
     const verified = models
       .find((candidate) => candidate.key === model.key)
       ?.loadedInstances.find(
@@ -92,10 +99,12 @@ export async function ensureModelLoaded(
   }
 
   for (const instance of model.loadedInstances) {
-    await client.unloadInstance(instance.id);
+    signal?.throwIfAborted();
+    await client.unloadInstance(instance.id, signal);
   }
-  const loaded = await client.loadModel(model, contextLength);
-  const models = await client.listModels();
+  signal?.throwIfAborted();
+  const loaded = await client.loadModel(model, contextLength, signal);
+  const models = await client.listModels(signal);
   const refreshed = models.find((candidate) => candidate.key === model.key);
   const verified = refreshed?.loadedInstances.find(
     (instance) => instance.id === loaded.instanceId && instance.contextLength === contextLength,
@@ -109,11 +118,16 @@ export async function ensureModelLoaded(
   return { instanceId: verified.id, models, reloaded: model.loadedInstances.length > 0 };
 }
 
-export async function unloadModel(client: ModelClient, model: ModelInfo): Promise<ModelInfo[]> {
+export async function unloadModel(
+  client: ModelClient,
+  model: ModelInfo,
+  signal?: AbortSignal,
+): Promise<ModelInfo[]> {
   for (const instance of model.loadedInstances) {
-    await client.unloadInstance(instance.id);
+    signal?.throwIfAborted();
+    await client.unloadInstance(instance.id, signal);
   }
-  const models = await client.listModels();
+  const models = await client.listModels(signal);
   const refreshed = models.find((candidate) => candidate.key === model.key);
   if (refreshed && refreshed.loadedInstances.length > 0) {
     throw new LmStudioError(

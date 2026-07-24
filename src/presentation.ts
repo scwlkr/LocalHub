@@ -26,6 +26,12 @@ export function renderStatus(
       `Server     online · ${snapshot.route.endpoint}`,
       `Auth       ${authLabel(snapshot.route.auth)}`,
     );
+    for (const attempt of snapshot.attempts.filter((candidate) => !candidate.ok)) {
+      lines.push(
+        `Attempt    ${routeName(attempt.kind)} · ${attempt.message ?? "failed"}`,
+        ...(attempt.fix ? [`Fix        ${attempt.fix}`] : []),
+      );
+    }
   } else {
     lines.push("Route      unavailable", "Server     offline");
     for (const attempt of snapshot.attempts) {

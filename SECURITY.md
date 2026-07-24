@@ -39,7 +39,9 @@ from a trusted account and terminal.
 The default endpoint is loopback-only. A direct-LAN route expands the attack
 surface:
 
-- LocalHub refuses to use `lanEndpoint` without a bearer token.
+- LocalHub refuses to use `lanEndpoint` without a bearer token. It first probes
+  without credentials and requires a `401` or `403`, then retries with the
+  bearer token; an anonymously accessible LAN server is rejected.
 - Plain `http://` does not encrypt the token, prompts, responses, or tool
   traffic. Use direct LAN only on a trusted, firewalled network.
 - Prefer LM Link when practical; LM Studio documents it as end-to-end

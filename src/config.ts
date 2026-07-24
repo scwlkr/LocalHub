@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, posix, win32 } from "node:path";
 import {
@@ -152,16 +152,26 @@ export async function saveSelectedModel(
   selectedModel: string,
   current: LocalHubConfig,
   path = configPath(),
+  signal?: AbortSignal,
 ): Promise<void> {
   const next = { ...current, selectedModel };
   const directory = dirname(path);
   const temporary = `${path}.${process.pid}.tmp`;
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await rename(temporary, path);
+  try {
+    signal?.throwIfAborted();
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    signal?.throwIfAborted();
+    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      signal,
+    });
+    signal?.throwIfAborted();
+    await rename(temporary, path);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {

@@ -94,6 +94,7 @@ export interface SystemInfo {
 
 export type LmStudioErrorKind =
   | "authentication"
+  | "cancelled"
   | "dns"
   | "firewall"
   | "host"

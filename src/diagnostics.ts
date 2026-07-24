@@ -7,6 +7,7 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
   const expectedArch = snapshot.system.platform === "darwin" ? "arm64" : "x64";
   const supportedPlatform =
     snapshot.system.platform === "darwin" || snapshot.system.platform === "win32";
+  const llms = snapshot.models.filter((model) => model.type === "llm");
 
   checks.push({
     name: "Platform",
@@ -68,11 +69,22 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
         fix: "Use only on a trusted LAN; prefer LM Link when available.",
       });
     }
+    const failedLanFallback =
+      snapshot.route.kind === "windows-lmlink"
+        ? lastFailedLanAttempt(snapshot.attempts)
+        : undefined;
+    if (failedLanFallback) {
+      checks.push({
+        name: "Direct LAN fallback",
+        level: llms.length === 0 ? "fail" : "warn",
+        detail: failedLanFallback.message ?? "Direct LAN fallback failed.",
+        ...(failedLanFallback.fix ? { fix: failedLanFallback.fix } : {}),
+      });
+    }
   } else {
     checks.push(routeFailureCheck(snapshot.attempts));
   }
 
-  const llms = snapshot.models.filter((model) => model.type === "llm");
   checks.push(
     !snapshot.route
       ? {
@@ -91,11 +103,11 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
             name: "LLM inventory",
             level: "fail",
             detail: "No installed LLMs were returned.",
-            fix: "Install Kimi 3 or another tool-capable LLM in LM Studio; LocalHub never downloads models.",
+            fix: "Install a tool-capable LLM in LM Studio; LocalHub never downloads models.",
           },
   );
 
-  const contextReady = llms.filter((model) => model.maxContextLength >= config.contextLength);
+  const selected = selectedModel(snapshot.models, config.selectedModel);
   checks.push(
     !snapshot.route
       ? {
@@ -103,34 +115,42 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
           level: "warn",
           detail: "Not checked because model discovery is unavailable.",
         }
-      : contextReady.length > 0
+      : selected?.maxContextLength !== undefined &&
+          selected.maxContextLength >= config.contextLength
         ? {
             name: "Context",
             level: "pass",
-            detail: `${contextReady.length} model(s) support ${formatNumber(config.contextLength)} tokens`,
+            detail: `${selected.displayName} supports ${formatNumber(config.contextLength)} tokens.`,
           }
-        : {
-            name: "Context",
-            level: llms.length === 0 ? "warn" : "fail",
-            detail: `No model supports the configured ${formatNumber(config.contextLength)} tokens.`,
-            fix: "Choose a model with a larger maximum context or lower contextLength in LocalHub config.",
-          },
+        : selected
+          ? {
+              name: "Context",
+              level: "fail",
+              detail: `${selected.displayName} supports ${formatNumber(selected.maxContextLength)} tokens, not ${formatNumber(config.contextLength)}.`,
+              fix: "Choose a model with a larger maximum context or lower contextLength in LocalHub config.",
+            }
+          : {
+              name: "Context",
+              level: "warn",
+              detail: "Not checked because no LLM is installed.",
+            },
   );
 
-  const selected = selectedModel(snapshot.models, config.selectedModel);
   if (selected) {
     checks.push(toolCompatibilityCheck(selected));
-    const exact = selected.loadedInstances.some(
-      (instance) => instance.contextLength === config.contextLength,
-    );
-    checks.push({
-      name: "Selected load",
-      level: exact ? "pass" : "warn",
-      detail: exact
-        ? `${selected.displayName} is loaded at ${formatNumber(config.contextLength)} tokens.`
-        : `${selected.displayName} is not loaded at ${formatNumber(config.contextLength)} tokens.`,
-      ...(exact ? {} : { fix: "Press l in the TUI; launch also loads/reloads automatically." }),
-    });
+    if (selected.maxContextLength >= config.contextLength) {
+      const exact = selected.loadedInstances.some(
+        (instance) => instance.contextLength === config.contextLength,
+      );
+      checks.push({
+        name: "Selected load",
+        level: exact ? "pass" : "warn",
+        detail: exact
+          ? `${selected.displayName} is loaded at ${formatNumber(config.contextLength)} tokens.`
+          : `${selected.displayName} is not loaded at ${formatNumber(config.contextLength)} tokens.`,
+        ...(exact ? {} : { fix: "Press l in the TUI; launch also loads/reloads automatically." }),
+      });
+    }
   }
 
   checks.push({
@@ -172,6 +192,16 @@ export function toolCompatibilityCheck(model: ModelInfo): CheckResult {
 function selectedModel(models: ModelInfo[], preferred?: string): ModelInfo | null {
   const llms = models.filter((model) => model.type === "llm");
   return llms.find((model) => model.key === preferred) ?? llms[0] ?? null;
+}
+
+function lastFailedLanAttempt(attempts: RouteAttempt[]): RouteAttempt | undefined {
+  for (let index = attempts.length - 1; index >= 0; index -= 1) {
+    const attempt = attempts[index];
+    if (attempt?.kind === "windows-lan" && !attempt.ok) {
+      return attempt;
+    }
+  }
+  return undefined;
 }
 
 function routeFailureCheck(attempts: RouteAttempt[]): CheckResult {

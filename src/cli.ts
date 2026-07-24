@@ -32,7 +32,20 @@ API tokens are never stored. Set the environment variable named by tokenEnv
 (default: LM_API_TOKEN) only in the shell that runs lh.
 `;
 
-export async function main(args = Bun.argv.slice(2)): Promise<number> {
+export interface CliDependencies {
+  collect?: typeof collectRuntime;
+  configFile?: string;
+  interactive?: boolean;
+  load?: typeof loadConfig;
+  platform?: NodeJS.Platform;
+  runInteractive?: typeof runTui;
+  runLocalCodex?: typeof runCodex;
+}
+
+export async function main(
+  args = Bun.argv.slice(2),
+  dependencies: CliDependencies = {},
+): Promise<number> {
   const command = parseCommand(args);
   if (command === "help") {
     console.log(HELP);
@@ -47,10 +60,10 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
     return 2;
   }
 
-  const path = configPath();
+  const path = dependencies.configFile ?? configPath();
   let config: LocalHubConfig;
   try {
-    config = await loadConfig(path);
+    config = await (dependencies.load ?? loadConfig)(path);
   } catch (error) {
     console.error(`Configuration error: ${errorMessage(error)}`);
     console.error(`Fix ${path}, or remove it to restore defaults.`);
@@ -58,7 +71,14 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
   }
 
   if (command === "status" || command === "doctor") {
-    const runtime = await collectRuntime(config);
+    let runtime: Awaited<ReturnType<typeof collectRuntime>>;
+    try {
+      runtime = await (dependencies.collect ?? collectRuntime)(config);
+    } catch (error) {
+      console.error(`State check failed: ${errorMessage(error)}`);
+      console.error("Fix: verify this platform build, then retry `lh doctor`.");
+      return 1;
+    }
     if (command === "status") {
       console.log(renderStatus(runtime.snapshot, config, path));
       return runtime.snapshot.route && runtime.snapshot.codexPath ? 0 : 1;
@@ -68,16 +88,26 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
     return checks.some((check) => check.level === "fail") ? 1 : 0;
   }
 
-  if (process.platform !== "darwin" && process.platform !== "win32") {
+  const platform = dependencies.platform ?? process.platform;
+  if (platform !== "darwin" && platform !== "win32") {
     console.error("LocalHub supports macOS arm64 and Windows x64.");
     return 2;
   }
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  const interactive =
+    dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!interactive) {
     console.error("The LocalHub TUI needs an interactive terminal. Run `lh status` instead.");
     return 2;
   }
 
-  const result = await runTui(config, path);
+  let result: Awaited<ReturnType<typeof runTui>>;
+  try {
+    result = await (dependencies.runInteractive ?? runTui)(config, path);
+  } catch (error) {
+    console.error(`LocalHub TUI failed: ${errorMessage(error)}`);
+    console.error("Fix: install the matching platform build and run `lh doctor`.");
+    return 1;
+  }
   if (result.kind === "quit") {
     return 0;
   }
@@ -90,7 +120,13 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
     ...(result.token ? { token: result.token } : {}),
     sourceTokenEnv: config.tokenEnv,
   });
-  return runCodex(spec);
+  try {
+    return await (dependencies.runLocalCodex ?? runCodex)(spec);
+  } catch (error) {
+    console.error(`Codex failed to start: ${errorMessage(error)}`);
+    console.error("Fix: reinstall Codex and confirm `codex --version` works in this shell.");
+    return 1;
+  }
 }
 
 function parseCommand(

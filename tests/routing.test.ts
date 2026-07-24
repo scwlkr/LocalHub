@@ -28,6 +28,9 @@ describe("routing", () => {
       if (String(input).startsWith("http://127.0.0.1")) {
         throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
       }
+      if (!headers.has("Authorization")) {
+        return jsonResponse({ error: "required" }, 401);
+      }
       return jsonResponse(modelsPayload());
     };
 
@@ -50,6 +53,10 @@ describe("routing", () => {
     expect(calls).toEqual([
       {
         url: "http://127.0.0.1:1234/api/v1/models",
+        auth: null,
+      },
+      {
+        url: "http://macbook.local:1234/api/v1/models",
         auth: null,
       },
       {
@@ -112,11 +119,14 @@ describe("routing", () => {
         lanEndpoint: "http://macbook.local:1234",
       },
       env: { LM_API_TOKEN: "secret" },
-      fetch: async (input) => {
+      fetch: async (input, init) => {
         calls.push(String(input));
-        return String(input).startsWith("http://127.0.0.1")
-          ? jsonResponse({ models: [] })
-          : jsonResponse(modelsPayload());
+        if (String(input).startsWith("http://127.0.0.1")) {
+          return jsonResponse({ models: [] });
+        }
+        return new Headers(init?.headers).has("Authorization")
+          ? jsonResponse(modelsPayload())
+          : jsonResponse({ error: "required" }, 401);
       },
     });
 
@@ -124,6 +134,7 @@ describe("routing", () => {
     expect(resolved.models[0]?.displayName).toBe("Kimi 3");
     expect(calls).toEqual([
       "http://127.0.0.1:1234/api/v1/models",
+      "http://macbook.local:1234/api/v1/models",
       "http://macbook.local:1234/api/v1/models",
     ]);
   });
@@ -137,10 +148,14 @@ describe("routing", () => {
         lanEndpoint: "http://macbook.local:1234",
       },
       env: { LM_API_TOKEN: "secret" },
-      fetch: async (input) =>
-        String(input).startsWith("http://127.0.0.1")
-          ? jsonResponse(modelsPayload(kimiModel({ key: "local/other-model" })))
-          : jsonResponse(modelsPayload()),
+      fetch: async (input, init) => {
+        if (String(input).startsWith("http://127.0.0.1")) {
+          return jsonResponse(modelsPayload(kimiModel({ key: "local/other-model" })));
+        }
+        return new Headers(init?.headers).has("Authorization")
+          ? jsonResponse(modelsPayload())
+          : jsonResponse({ error: "required" }, 401);
+      },
     });
 
     expect(resolved.active?.kind).toBe("windows-lan");
@@ -168,5 +183,51 @@ describe("routing", () => {
         auth: "missing",
       }),
     ]);
+  });
+
+  test("rejects a direct-LAN server that accepts anonymous requests", async () => {
+    const resolved = await resolveRoute({
+      platform: "win32",
+      config: {
+        ...defaultConfig(),
+        lanEndpoint: "http://macbook.local:1234",
+      },
+      env: { LM_API_TOKEN: "secret" },
+      fetch: async (input) => {
+        if (String(input).startsWith("http://127.0.0.1")) {
+          throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+        }
+        return jsonResponse(modelsPayload());
+      },
+    });
+
+    expect(resolved.active).toBeNull();
+    expect(resolved.attempts.at(-1)).toEqual(
+      expect.objectContaining({
+        kind: "windows-lan",
+        auth: "not-required",
+        ok: false,
+        message: "Direct-LAN server accepted an unauthenticated request.",
+        fix: expect.stringContaining("Enable Require Authentication"),
+      }),
+    );
+  });
+
+  test("reports the protocol default port in firewall fixes", async () => {
+    const resolved = await resolveRoute({
+      platform: "win32",
+      config: {
+        ...defaultConfig(),
+        lanEndpoint: "https://macbook.local",
+      },
+      env: { LM_API_TOKEN: "secret" },
+      fetch: async (input) => {
+        throw Object.assign(new Error("unreachable"), {
+          code: String(input).startsWith("https://") ? "ETIMEDOUT" : "ECONNREFUSED",
+        });
+      },
+    });
+
+    expect(resolved.attempts.at(-1)?.fix).toContain("TCP 443");
   });
 });

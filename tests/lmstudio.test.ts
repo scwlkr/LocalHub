@@ -138,4 +138,23 @@ describe("LM Studio API", () => {
 
     await expect(client.listModels()).rejects.toMatchObject({ kind: "timeout" });
   });
+
+  test("cancels an in-flight response body read", async () => {
+    const controller = new AbortController();
+    const client = new LmStudioClient("http://localhost:1234", {
+      fetch: async (_input, init) =>
+        ({
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(new Error("body aborted")));
+            }),
+        }) as Response,
+    });
+
+    const models = client.listModels(controller.signal);
+    controller.abort();
+    await expect(models).rejects.toMatchObject({ kind: "cancelled" });
+  });
 });

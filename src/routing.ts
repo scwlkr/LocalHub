@@ -50,6 +50,7 @@ export async function resolveRoute(options: {
   fetch?: FetchLike;
   hostname?: string;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<ResolvedRoute> {
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
@@ -72,13 +73,39 @@ export async function resolveRoute(options: {
     }
 
     if (candidate.tokenRequired && token) {
+      const anonymousProbe = new LmStudioClient(candidate.endpoint, {
+        fetch: options.fetch,
+        timeoutMs: options.timeoutMs,
+      });
+      try {
+        await anonymousProbe.listModels(options.signal);
+        attempts.push({
+          kind: candidate.kind,
+          endpoint: candidate.endpoint,
+          auth: "not-required",
+          ok: false,
+          errorKind: "authentication",
+          message: "Direct-LAN server accepted an unauthenticated request.",
+          fix: "Enable Require Authentication in LM Studio before using direct LAN.",
+        });
+        continue;
+      } catch (error) {
+        if (isCancellationError(error)) {
+          throw error;
+        }
+        if (!isAuthenticationError(error)) {
+          attempts.push(failedAttempt(candidate, error, "unknown", options.config.tokenEnv));
+          continue;
+        }
+      }
+
       const authenticated = new LmStudioClient(candidate.endpoint, {
         fetch: options.fetch,
         token,
         timeoutMs: options.timeoutMs,
       });
       try {
-        const models = await authenticated.listModels();
+        const models = await authenticated.listModels(options.signal);
         const resolved = successfulResolution(
           candidate,
           "accepted",
@@ -94,6 +121,9 @@ export async function resolveRoute(options: {
         }
         return resolved;
       } catch (error) {
+        if (isCancellationError(error)) {
+          throw error;
+        }
         const auth = isAuthenticationError(error) ? "rejected" : "unknown";
         attempts.push(failedAttempt(candidate, error, auth, options.config.tokenEnv));
         continue;
@@ -105,7 +135,7 @@ export async function resolveRoute(options: {
       timeoutMs: options.timeoutMs,
     });
     try {
-      const models = await unauthenticated.listModels();
+      const models = await unauthenticated.listModels(options.signal);
       const resolved = successfulResolution(
         candidate,
         "not-required",
@@ -121,6 +151,9 @@ export async function resolveRoute(options: {
       }
       return resolved;
     } catch (error) {
+      if (isCancellationError(error)) {
+        throw error;
+      }
       if (!isAuthenticationError(error)) {
         attempts.push(failedAttempt(candidate, error, "unknown", options.config.tokenEnv));
         continue;
@@ -137,7 +170,7 @@ export async function resolveRoute(options: {
       timeoutMs: options.timeoutMs,
     });
     try {
-      const models = await authenticated.listModels();
+      const models = await authenticated.listModels(options.signal);
       const resolved = successfulResolution(
         candidate,
         "accepted",
@@ -153,6 +186,9 @@ export async function resolveRoute(options: {
       }
       return resolved;
     } catch (error) {
+      if (isCancellationError(error)) {
+        throw error;
+      }
       const auth = isAuthenticationError(error) ? "rejected" : "unknown";
       attempts.push(failedAttempt(candidate, error, auth, options.config.tokenEnv));
     }
@@ -264,7 +300,7 @@ function fixForError(error: LmStudioError, candidate: Candidate, tokenEnv: strin
     case "dns":
       return `Check that ${new URL(candidate.endpoint).hostname} resolves, or use the Mac LAN IP.`;
     case "firewall":
-      return `Enable Serve on Local Network and allow TCP ${new URL(candidate.endpoint).port || "1234"} through the Mac firewall.`;
+      return `Enable Serve on Local Network and allow TCP ${endpointPort(candidate.endpoint)} through the Mac firewall.`;
     case "invalid-response":
       return "Use LM Studio 0.4.0 or newer and configure the server origin without /v1.";
     case "http":
@@ -280,6 +316,15 @@ function fixForError(error: LmStudioError, candidate: Candidate, tokenEnv: strin
 
 function isAuthenticationError(error: unknown): error is LmStudioError {
   return error instanceof LmStudioError && error.kind === "authentication";
+}
+
+function isCancellationError(error: unknown): error is LmStudioError {
+  return error instanceof LmStudioError && error.kind === "cancelled";
+}
+
+function endpointPort(endpoint: string): string {
+  const url = new URL(endpoint);
+  return url.port || (url.protocol === "https:" ? "443" : "80");
 }
 
 export function isSupportedPlatform(platform: NodeJS.Platform): platform is SupportedPlatform {

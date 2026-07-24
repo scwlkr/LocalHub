@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
+import type { KeyEvent } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import { defaultConfig } from "../src/config.ts";
-import type { RuntimeSnapshot } from "../src/runtime.ts";
+import type { RuntimeContext, RuntimeSnapshot } from "../src/runtime.ts";
 import { initialTuiState, reduceTuiState } from "../src/state.ts";
-import { createTuiLayout, updateTuiLayout } from "../src/tui.ts";
+import { createTuiLayout, runTui, updateTuiLayout } from "../src/tui.ts";
 import { kimiModel } from "./fixtures.ts";
 
 test("OpenTUI layout renders runtime Kimi details and all action hints", async () => {
@@ -124,6 +125,100 @@ test("diagnostics use the highlighted model and can scroll to every check", asyn
     expect(frame).toContain("Memory: 64 GiB total");
   } finally {
     renderer.destroy();
+  }
+});
+
+test("quit cancels refresh and waits for renderer teardown", async () => {
+  const { renderer } = await createTestRenderer({ width: 90, height: 24 });
+  const originalDestroy = renderer.destroy.bind(renderer);
+  let destroyCalls = 0;
+  renderer.destroy = () => {
+    destroyCalls += 1;
+  };
+  let signal: AbortSignal | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  try {
+    const resultPromise = runTui(defaultConfig(), "/tmp/config.json", {
+      createRenderer: async () => renderer,
+      collect: async (_config, options) => {
+        signal = options?.signal;
+        markStarted?.();
+        return await new Promise<RuntimeContext>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new Error("cancelled")), {
+            once: true,
+          });
+        });
+      },
+    });
+    let resolved = false;
+    void resultPromise.then(() => {
+      resolved = true;
+    });
+
+    await started;
+    renderer.keyInput.emit("keypress", { name: "q", ctrl: false } as KeyEvent);
+    await Bun.sleep(0);
+
+    expect(signal?.aborted).toBe(true);
+    expect(destroyCalls).toBe(1);
+    expect(resolved).toBe(false);
+
+    renderer.emit("destroy");
+    expect(await resultPromise).toEqual({ kind: "quit" });
+  } finally {
+    renderer.destroy = originalDestroy;
+    originalDestroy();
+  }
+});
+
+test("launch continues when saving the model preference fails", async () => {
+  const { renderer } = await createTestRenderer({ width: 90, height: 24 });
+  let markReady: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    markReady = resolve;
+  });
+  const model = kimiModel();
+  try {
+    const resultPromise = runTui(defaultConfig(), "/read-only/config.json", {
+      createRenderer: async () => renderer,
+      collect: async () => {
+        markReady?.();
+        return {
+          snapshot: runtimeSnapshot([model]),
+          client: {} as RuntimeContext["client"],
+        };
+      },
+      ensureLoaded: async () => ({
+        instanceId: "loaded-instance",
+        models: [
+          kimiModel({
+            loadedInstances: [{ id: "loaded-instance", contextLength: 65_536 }],
+          }),
+        ],
+        reloaded: false,
+      }),
+      saveSelection: async () => {
+        throw new Error("read-only");
+      },
+    });
+
+    await ready;
+    await Bun.sleep(0);
+    renderer.keyInput.emit("keypress", { name: "c", ctrl: false } as KeyEvent);
+
+    expect(await resultPromise).toEqual({
+      kind: "launch",
+      codexPath: "/usr/local/bin/codex",
+      modelId: "loaded-instance",
+      endpoint: "http://127.0.0.1:1234",
+    });
+  } finally {
+    if (!renderer.isDestroyed) {
+      renderer.destroy();
+    }
   }
 });
 
