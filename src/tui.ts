@@ -103,7 +103,7 @@ export function createTuiLayout(renderer: CliRenderer): TuiLayout {
     title: " Selection ",
     border: true,
     borderColor: "#475569",
-    height: 7,
+    height: 9,
     paddingX: 1,
     scrollX: false,
     scrollY: true,

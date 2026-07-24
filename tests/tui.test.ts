@@ -46,6 +46,7 @@ test("OpenTUI layout renders runtime Kimi details and all action hints", async (
     expect(frame).toContain("Kimi 3");
     expect(frame).toContain("catalog/runtime-kimi-3-q4");
     expect(frame).toContain("65,536");
+    expect(frame).toContain("default on");
     expect(frame).toContain("load/reload");
     expect(frame).toContain("diagnostics");
   } finally {

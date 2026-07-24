@@ -105,15 +105,13 @@ export function renderModelDetails(model: ModelInfo | null): string {
       : capability?.trainedForToolUse === false
         ? "no (Codex tools may be unreliable)"
         : "unknown";
-  const reasoning = capability?.reasoning
-    ? capability.reasoning.allowedOptions.join("/")
-    : "not advertised";
   return [
     `${model.displayName} · ${model.key}`,
     `${model.publisher} · ${model.architecture ?? "unknown arch"} · ${model.format ?? "unknown format"} · ${quantizationLabel(model)}`,
     `Size ${formatBytes(model.sizeBytes)} · Max context ${formatNumber(model.maxContextLength)} · Params ${model.paramsString ?? "unknown"}`,
+    `Variant: ${model.selectedVariant ?? "not advertised"}`,
     `Loaded: ${loaded}`,
-    `Capabilities: tools ${tool} · vision ${yesNoUnknown(capability?.vision)} · reasoning ${reasoning}`,
+    `Capabilities: tools ${tool} · vision ${yesNoUnknown(capability?.vision)} · reasoning ${reasoningLabel(model)}`,
   ].join("\n");
 }
 
@@ -149,9 +147,20 @@ function modelStatusLines(model: ModelInfo): string[] {
   return [
     `  ${model.displayName} [${model.type}]`,
     `    key=${model.key}`,
+    `    variant=${model.selectedVariant ?? "not advertised"} · format=${model.format ?? "unknown"}`,
     `    ${quantizationLabel(model)} · ${formatBytes(model.sizeBytes)} · max=${formatNumber(model.maxContextLength)} · loaded=${loaded}`,
-    `    tools=${yesNoUnknown(model.capabilities?.trainedForToolUse)} · vision=${yesNoUnknown(model.capabilities?.vision)}`,
+    `    tools=${yesNoUnknown(model.capabilities?.trainedForToolUse)} · vision=${yesNoUnknown(model.capabilities?.vision)} · reasoning=${reasoningLabel(model)}`,
   ];
+}
+
+function reasoningLabel(model: ModelInfo): string {
+  const reasoning = model.capabilities?.reasoning;
+  if (!reasoning) {
+    return "not advertised";
+  }
+  const options =
+    reasoning.allowedOptions.length > 0 ? reasoning.allowedOptions.join("/") : "options unknown";
+  return reasoning.default ? `${options} (default ${reasoning.default})` : options;
 }
 
 function quantizationLabel(model: ModelInfo): string {
