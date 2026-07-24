@@ -65,6 +65,34 @@ describe("model state operations", () => {
     expect(calls).toEqual(["unload:old", "load:65536", "list"]);
   });
 
+  test("rejects unsupported context before unloading a working instance", async () => {
+    const calls: string[] = [];
+    await expect(
+      ensureModelLoaded(
+        {
+          unloadInstance: async (id) => {
+            calls.push(`unload:${id}`);
+            return id;
+          },
+          loadModel: async () => {
+            calls.push("load");
+            return { instanceId: "new" };
+          },
+          listModels: async () => {
+            calls.push("list");
+            return [];
+          },
+        },
+        kimiModel({
+          maxContextLength: 32_768,
+          loadedInstances: [{ id: "working", contextLength: 32_768 }],
+        }),
+        65_536,
+      ),
+    ).rejects.toMatchObject({ kind: "unsupported-context" });
+    expect(calls).toEqual([]);
+  });
+
   test("fails closed when LM Studio does not confirm the loaded context", async () => {
     await expect(
       ensureModelLoaded(

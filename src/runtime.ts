@@ -68,6 +68,12 @@ export async function ensureModelLoaded(
   model: ModelInfo,
   contextLength: number,
 ): Promise<LoadOutcome> {
+  if (model.maxContextLength < contextLength) {
+    throw new LmStudioError(
+      "unsupported-context",
+      `${model.displayName} supports ${model.maxContextLength} tokens, not ${contextLength}.`,
+    );
+  }
   const ready = model.loadedInstances.find((instance) => instance.contextLength === contextLength);
   if (ready) {
     const models = await client.listModels();

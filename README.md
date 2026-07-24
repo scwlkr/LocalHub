@@ -61,10 +61,11 @@ On the inference Mac:
 
 For Windows, choose either route:
 
-- **LM Link:** link the Windows machine and Mac in LM Studio, set the 64 GB Mac
-  as the preferred device on Windows, and start the Windows LM Studio server.
-  Windows still talks to `http://127.0.0.1:1234`; LM Studio routes the model
-  work to the preferred linked device. LM Link is optional.
+- **LM Link:** sign in to LM Studio on both machines, link the Windows machine
+  and Mac, set the 64 GB Mac as the preferred device on Windows, and start the
+  Windows LM Studio server. Windows still talks to
+  `http://127.0.0.1:1234`; LM Studio routes the model work to the preferred
+  linked device. LM Link is optional.
 - **Direct LAN fallback:** on the Mac, enable **Serve on Local Network**,
   require authentication, create an API token with model permissions, and
   allow the server port through the Mac firewall. Set `lanEndpoint` on
@@ -237,8 +238,10 @@ bun run build
 `bun run check` runs formatting checks, linting, strict TypeScript checking,
 and focused Bun tests. The tests mock network and process boundaries; they do
 not claim live LM Studio, LM Link, model-quality, or physical-device coverage.
-`bun run build` produces and signs the standalone executable for the current
-host. Each target is built and smoke-tested on its native host in CI.
+`bun run build` produces the standalone executable for the current host and
+smoke-tests it. macOS builds receive an ad hoc signature; Windows builds are
+unsigned. CI is configured to build and smoke-test each target on its native
+host.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 

@@ -121,4 +121,21 @@ describe("LM Studio API", () => {
       ),
     ).toBe("firewall");
   });
+
+  test("keeps the timeout active while reading the response body", async () => {
+    const client = new LmStudioClient("http://localhost:1234", {
+      timeoutMs: 10,
+      fetch: async (_input, init) =>
+        ({
+          ok: true,
+          status: 200,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => reject(new Error("body aborted")));
+            }),
+        }) as Response,
+    });
+
+    await expect(client.listModels()).rejects.toMatchObject({ kind: "timeout" });
+  });
 });

@@ -104,12 +104,14 @@ export class LmStudioClient {
     }
 
     let response: Response;
+    let text: string;
     try {
       response = await this.#fetch(`${this.endpoint}${path}`, {
         ...init,
         headers,
         signal: controller.signal,
       });
+      text = await response.text();
     } catch (error) {
       if (controller.signal.aborted) {
         throw new LmStudioError("timeout", `LM Studio did not respond within ${timeoutMs} ms.`);
@@ -120,7 +122,6 @@ export class LmStudioClient {
       clearTimeout(timer);
     }
 
-    const text = await response.text();
     if (!response.ok) {
       const message = parseErrorMessage(text) ?? `LM Studio returned HTTP ${response.status}.`;
       const kind: LmStudioErrorKind =

@@ -3,6 +3,7 @@ import {
   type CliRenderer,
   createCliRenderer,
   type KeyEvent,
+  ScrollBoxRenderable,
   type SelectOption,
   SelectRenderable,
   SelectRenderableEvents,
@@ -32,9 +33,10 @@ export type TuiResult =
 export interface TuiLayout {
   summary: TextRenderable;
   models: SelectRenderable;
+  detailsBox: ScrollBoxRenderable;
   details: TextRenderable;
   footer: TextRenderable;
-  modelKeys: string;
+  modelOptionsSignature: string;
 }
 
 export function createTuiLayout(renderer: CliRenderer): TuiLayout {
@@ -87,18 +89,20 @@ export function createTuiLayout(renderer: CliRenderer): TuiLayout {
     selectedTextColor: "#ffffff",
     selectedDescriptionColor: "#bae6fd",
   });
-  const detailsBox = new BoxRenderable(renderer, {
+  const detailsBox = new ScrollBoxRenderable(renderer, {
     id: "details-box",
     title: " Selection ",
     border: true,
     borderColor: "#475569",
     height: 7,
     paddingX: 1,
+    scrollX: false,
+    scrollY: true,
   });
   const details = new TextRenderable(renderer, {
     id: "details",
     width: "100%",
-    height: "100%",
+    height: "auto",
     content: "No LLM selected.",
   });
   const footer = new TextRenderable(renderer, {
@@ -120,7 +124,14 @@ export function createTuiLayout(renderer: CliRenderer): TuiLayout {
   renderer.root.add(root);
   models.focus();
 
-  return { summary, models, details, footer, modelKeys: "" };
+  return {
+    summary,
+    models,
+    detailsBox,
+    details,
+    footer,
+    modelOptionsSignature: "",
+  };
 }
 
 export function updateTuiLayout(
@@ -131,23 +142,37 @@ export function updateTuiLayout(
 ): void {
   layout.summary.content = renderTuiSummary(state.snapshot, config);
   const llms = state.snapshot?.models.filter((model) => model.type === "llm") ?? [];
-  const keys = llms.map((model) => model.key).join("\0");
-  if (keys !== layout.modelKeys) {
-    layout.models.options = llms.map(modelOption);
-    layout.modelKeys = keys;
+  const options = llms.map(modelOption);
+  const optionsSignature = JSON.stringify(options);
+  if (optionsSignature !== layout.modelOptionsSignature) {
+    layout.models.options = options;
+    layout.modelOptionsSignature = optionsSignature;
   }
   const selectedIndex = llms.findIndex((model) => model.key === state.selectedModel);
   if (selectedIndex >= 0 && layout.models.getSelectedIndex() !== selectedIndex) {
     layout.models.setSelectedIndex(selectedIndex);
   }
   const selected = llms.find((model) => model.key === state.selectedModel) ?? null;
+  const diagnosticConfig = state.selectedModel
+    ? { ...config, selectedModel: state.selectedModel }
+    : config;
   layout.details.content =
     showDiagnostics && state.snapshot
-      ? renderTuiDiagnostics(state.snapshot, config)
+      ? renderTuiDiagnostics(state.snapshot, diagnosticConfig)
       : renderModelDetails(selected);
+  layout.detailsBox.title = showDiagnostics ? " Diagnostics " : " Selection ";
+  layout.detailsBox.verticalScrollBar.visible = showDiagnostics;
+  layout.detailsBox.scrollTo(0);
+  if (showDiagnostics) {
+    layout.detailsBox.focus();
+  } else {
+    layout.models.focus();
+  }
   const busy = state.phase === "busy" ? " [busy]" : "";
   layout.footer.content = [
-    "↑/↓ select · Enter/c launch · l load/reload · u unload · r refresh · d diagnostics · q quit",
+    showDiagnostics
+      ? "↑/↓ or j/k scroll diagnostics · d close · l load/reload · u unload · r refresh · q quit"
+      : "↑/↓ select · Enter/c launch · l load/reload · u unload · r refresh · d diagnostics · q quit",
     `${state.message}${busy}`,
   ].join("\n");
 }
