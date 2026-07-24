@@ -33,6 +33,7 @@ API tokens are never stored. Set the environment variable named by tokenEnv
 `;
 
 export interface CliDependencies {
+  arch?: string;
   collect?: typeof collectRuntime;
   configFile?: string;
   interactive?: boolean;
@@ -89,7 +90,12 @@ export async function main(
   }
 
   const platform = dependencies.platform ?? process.platform;
-  if (platform !== "darwin" && platform !== "win32") {
+  const arch = dependencies.arch ?? process.arch;
+  if (
+    (platform !== "darwin" && platform !== "win32") ||
+    (platform === "darwin" && arch !== "arm64") ||
+    (platform === "win32" && arch !== "x64")
+  ) {
     console.error("LocalHub supports macOS arm64 and Windows x64.");
     return 2;
   }

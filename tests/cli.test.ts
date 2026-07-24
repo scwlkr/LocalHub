@@ -5,6 +5,7 @@ import { defaultConfig } from "../src/config.ts";
 test("CLI turns renderer startup failures into a concise fix", async () => {
   const result = await captureErrors(() =>
     main([], {
+      arch: "arm64",
       configFile: "/test/config.json",
       interactive: true,
       load: async () => defaultConfig(),
@@ -25,6 +26,7 @@ test("CLI turns renderer startup failures into a concise fix", async () => {
 test("CLI turns a Codex spawn race into a concise dependency fix", async () => {
   const result = await captureErrors(() =>
     main([], {
+      arch: "arm64",
       configFile: "/test/config.json",
       interactive: true,
       load: async () => defaultConfig(),

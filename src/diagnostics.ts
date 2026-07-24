@@ -18,7 +18,7 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
   if (supportedPlatform && snapshot.system.arch !== expectedArch) {
     checks.push({
       name: "Architecture",
-      level: "warn",
+      level: "fail",
       detail: `Expected ${expectedArch}; found ${snapshot.system.arch}.`,
       fix: `Install the ${snapshot.system.platform === "darwin" ? "macOS arm64" : "Windows x64"} build.`,
     });

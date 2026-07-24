@@ -118,6 +118,18 @@ describe("diagnostics", () => {
       }),
     );
   });
+
+  test("fails an unsupported architecture on an otherwise supported OS", () => {
+    const snapshot = onlineSnapshot([kimiModel()]);
+    snapshot.system.arch = "x64";
+
+    expect(diagnose(snapshot, defaultConfig())).toContainEqual(
+      expect.objectContaining({
+        name: "Architecture",
+        level: "fail",
+      }),
+    );
+  });
 });
 
 function onlineSnapshot(models: RuntimeSnapshot["models"]): RuntimeSnapshot {
