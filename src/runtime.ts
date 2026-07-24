@@ -1,0 +1,111 @@
+import { type LmStudioClient, LmStudioError } from "./lmstudio.ts";
+import { type ResolvedRoute, resolveRoute } from "./routing.ts";
+import { collectSystemInfo, findCodex } from "./system.ts";
+import type { ActiveRoute, LocalHubConfig, ModelInfo, RouteAttempt, SystemInfo } from "./types.ts";
+
+export interface RuntimeSnapshot {
+  system: SystemInfo;
+  codexPath: string | null;
+  route: ActiveRoute | null;
+  attempts: RouteAttempt[];
+  models: ModelInfo[];
+}
+
+export interface RuntimeContext {
+  snapshot: RuntimeSnapshot;
+  client: LmStudioClient | null;
+}
+
+export async function collectRuntime(
+  config: LocalHubConfig,
+  options: {
+    platform?: NodeJS.Platform;
+    env?: NodeJS.ProcessEnv;
+    cwd?: string;
+    hostname?: string;
+    resolve?: typeof resolveRoute;
+    which?: (command: string) => string | null;
+  } = {},
+): Promise<RuntimeContext> {
+  const system = collectSystemInfo(options.cwd);
+  const resolve = options.resolve ?? resolveRoute;
+  const [route, codexPath] = await Promise.all([
+    resolve({
+      config,
+      hostname: options.hostname ?? system.hostname,
+      ...(options.platform === undefined ? {} : { platform: options.platform }),
+      ...(options.env === undefined ? {} : { env: options.env }),
+    }),
+    Promise.resolve(findCodex(options.which)),
+  ]);
+
+  return {
+    snapshot: {
+      system,
+      codexPath,
+      route: route.active,
+      attempts: route.attempts,
+      models: route.models,
+    },
+    client: route.client,
+  };
+}
+
+export interface LoadOutcome {
+  instanceId: string;
+  models: ModelInfo[];
+  reloaded: boolean;
+}
+
+interface ModelClient {
+  loadModel(model: ModelInfo, contextLength: number): Promise<{ instanceId: string }>;
+  unloadInstance(instanceId: string): Promise<string>;
+  listModels(): Promise<ModelInfo[]>;
+}
+
+export async function ensureModelLoaded(
+  client: ModelClient,
+  model: ModelInfo,
+  contextLength: number,
+): Promise<LoadOutcome> {
+  const ready = model.loadedInstances.find((instance) => instance.contextLength === contextLength);
+  if (ready) {
+    return { instanceId: ready.id, models: await client.listModels(), reloaded: false };
+  }
+
+  for (const instance of model.loadedInstances) {
+    await client.unloadInstance(instance.id);
+  }
+  const loaded = await client.loadModel(model, contextLength);
+  const models = await client.listModels();
+  const refreshed = models.find((candidate) => candidate.key === model.key);
+  const verified = refreshed?.loadedInstances.find(
+    (instance) => instance.id === loaded.instanceId && instance.contextLength === contextLength,
+  );
+  if (!verified) {
+    throw new LmStudioError(
+      "invalid-response",
+      `LM Studio did not confirm ${loaded.instanceId} at ${contextLength} tokens.`,
+    );
+  }
+  return { instanceId: verified.id, models, reloaded: model.loadedInstances.length > 0 };
+}
+
+export async function unloadModel(client: ModelClient, model: ModelInfo): Promise<ModelInfo[]> {
+  for (const instance of model.loadedInstances) {
+    await client.unloadInstance(instance.id);
+  }
+  const models = await client.listModels();
+  const refreshed = models.find((candidate) => candidate.key === model.key);
+  if (refreshed && refreshed.loadedInstances.length > 0) {
+    throw new LmStudioError(
+      "invalid-response",
+      `LM Studio still reports ${model.displayName} loaded.`,
+    );
+  }
+  return models;
+}
+
+export function withModels(route: ResolvedRoute, models: ModelInfo[]): ResolvedRoute {
+  return { ...route, models };
+}

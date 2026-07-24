@@ -1,0 +1,35 @@
+{
+  "name": "localhub",
+  "version": "0.1.0",
+  "description": "Tiny TUI for running Codex against LM Studio models",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "lh": "src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun test",
+    "build:macos-arm64": "bun build --compile --minify --target=bun-darwin-arm64 src/cli.ts --outfile dist/lh-macos-arm64",
+    "build:windows-x64": "bun build --compile --minify --target=bun-windows-x64 src/cli.ts --outfile dist/lh-windows-x64.exe",
+    "build": "bun run build:macos-arm64 && bun run build:windows-x64"
+  },
+  "dependencies": {
+    "@opentui/core": "0.4.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.5",
+    "@types/bun": "1.3.5",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "packageManager": "bun@1.3.5",
+  "license": "MIT"
+}
