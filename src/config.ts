@@ -154,7 +154,15 @@ export async function saveSelectedModel(
   path = configPath(),
   signal?: AbortSignal,
 ): Promise<void> {
-  const next = { ...current, selectedModel };
+  await saveConfig({ ...current, selectedModel }, path, signal);
+}
+
+export async function saveConfig(
+  config: LocalHubConfig,
+  path = configPath(),
+  signal?: AbortSignal,
+): Promise<void> {
+  const next = parseConfig(config);
   const directory = dirname(path);
   const temporary = `${path}.${process.pid}.tmp`;
   try {

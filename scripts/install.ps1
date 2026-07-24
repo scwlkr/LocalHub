@@ -2,7 +2,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    [switch]$SkipSetup
 )
 
 Set-StrictMode -Version Latest
@@ -244,6 +245,16 @@ try {
     }
 
     Write-Host "Installed $InstalledExecutable"
+    if (-not $SkipSetup) {
+        Write-Host ""
+        Write-Host "Starting the Windows connection wizard..."
+        & $InstalledExecutable setup
+        $SetupExitCode = $LASTEXITCODE
+        if ($SetupExitCode -ne 0) {
+            Write-Warning "LocalHub is installed, but setup is not complete. Fix the reported item and run: lh setup"
+        }
+    }
+
     if ($UsingDefaultInstallDir) {
         Write-Host "Run: lh --help"
         Write-Host "If lh is not found, open a new terminal."

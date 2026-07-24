@@ -23,6 +23,8 @@ Windows workstation.
 - Tears down the alternate screen before starting Codex with inherited
   standard input/output/error. LocalHub returns Codex's exit code when Codex
   exits.
+- Includes a Windows `lh setup` wizard for LM Link or authenticated direct
+  LAN. Tokens are read with hidden input and remain process-scoped.
 - Saves only non-secret preferences in the standard per-user configuration
   directory.
 
@@ -32,7 +34,8 @@ telemetry, database, web UI, or hosted-provider manager.
 ## Requirements
 
 - macOS arm64 or Windows x64
-- [LM Studio](https://lmstudio.ai/) 0.4.15 or newer
+- [LM Studio](https://lmstudio.ai/) 0.4.15 or newer; LocalHub is live-tested
+  with 0.4.20
 - The current [Codex CLI](https://developers.openai.com/codex/cli), available
   as `codex` on `PATH`
 - At least one LLM already installed in LM Studio
@@ -70,22 +73,63 @@ This builds, smoke-tests, and installs
 per-user `PATH` when needed. Open a new terminal if `lh` is not found
 immediately.
 
-Then prepare LM Studio:
+### Tested Mac path
 
-1. Update LM Studio, install a tool-capable LLM whose maximum context is at
-   least 65,536, and start the Developer server.
-2. On Windows, complete either the optional LM Link setup or the authenticated
-   direct-LAN setup below.
-3. Run `lh doctor` and resolve any `FAIL`.
-4. Change to the project you want Codex to work on and run `lh`.
+The following is the tested 64 GB Apple-silicon path. `gpt-oss-20b` is a
+reference model, not a hardcoded LocalHub dependency:
 
-The source installers only build and copy LocalHub. They do not install or
-update Bun, LM Studio, Codex, models, links, or firewall rules.
+```sh
+lms get openai/gpt-oss-20b --mlx --yes
+lms load openai/gpt-oss-20b --gpu max --context-length 65536 --estimate-only --yes
+lms server start --port 1234
+lh doctor
+lh
+```
+
+In `lh`, press `l` to load at 65,536 tokens or `Enter`/`c` to load and launch
+Codex. On the tested M1 Max, LM Studio estimated 15.78 GiB total memory for
+this load. The live checks confirmed 131,072 maximum context, native tool-use
+metadata, a Responses API function call, and a Codex shell tool call in the
+calling directory.
+
+### Windows path
+
+The Windows installer now starts `lh setup` automatically after installation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+The wizard checks Codex and the local LM Studio API, then offers:
+
+1. **LM Link:** runs the opted-in `lms` sign-in/link commands, lets you choose
+   the Mac as Windows' preferred device, starts the Windows API server when
+   needed, and verifies the visible model inventory.
+2. **Direct LAN:** asks for the Mac origin and token, verifies anonymous access
+   is rejected before sending the bearer token, lists the Mac's LLMs, checks
+   the 65,536-token requirement, and saves only non-secret preferences.
+
+The wizard can launch `lh` immediately. For later direct-LAN sessions, `lh`
+asks for the token with hidden input only when the local/LM Link route cannot
+serve the selected model. The token is not written to config, the user
+environment, PowerShell profile, or registry.
+
+Use `-SkipSetup` only for automation:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -SkipSetup
+```
+
+The source installers do not install or update Bun, LM Studio, Codex, models,
+or firewall rules. The Windows installer starts the explicit setup wizard
+unless `-SkipSetup` is supplied.
 
 ## LM Studio preparation
 
 LocalHub manages already-installed models; it does not install LM Studio,
-download model weights, create links, or change server security settings.
+download model weights, or change the Mac's server security/firewall settings.
+The Windows setup wizard can run LM Studio's documented link, preferred-device,
+and local-server CLI commands after prompting.
 
 On the inference Mac:
 
@@ -102,12 +146,11 @@ For Windows, choose either route:
   and Mac, set the 64 GB Mac as the preferred device on Windows, and start the
   Windows LM Studio server. Windows still talks to
   `http://127.0.0.1:1234`; LM Studio routes the model work to the preferred
-  linked device. LM Link is optional.
+  linked device. `lh setup` guides these steps. LM Link is optional.
 - **Direct LAN fallback:** on the Mac, enable **Serve on Local Network**,
   require authentication, create an API token with model permissions, and
-  allow the server port through the Mac firewall. Set `lanEndpoint` on
-  Windows and expose the token only through the configured environment
-  variable.
+  allow the server port through the Mac firewall. Run `lh setup` on Windows;
+  it stores the endpoint but keeps the entered token in memory only.
 
 Direct LAN requires no LM Link dependency. Plain HTTP is not encrypted, so use
 it only on a trusted LAN. See [SECURITY.md](SECURITY.md).
@@ -124,10 +167,11 @@ A successful model inventory request is the server-health check. LocalHub
 reports authentication, DNS, firewall, host, HTTP, timeout, malformed-response,
 and unsupported-context failures with a focused fix.
 
-For direct LAN, LocalHub requires the configured token in the environment,
-first verifies that an anonymous request receives `401` or `403`, and only then
-sends the bearer token. If the server accepts the anonymous probe, LocalHub
-refuses the route and tells you to enable **Require Authentication**.
+For direct LAN, LocalHub requires a process-scoped token from hidden input or
+the configured environment variable. It first verifies that an anonymous
+request receives `401` or `403`, and only then sends the bearer token. If the
+server accepts the anonymous probe, LocalHub refuses the route and tells you
+to enable **Require Authentication**.
 
 LM Link does not identify the actual inference device in the REST response, so
 LocalHub cannot prove which linked machine served a request. Set the Mac as the
@@ -139,6 +183,7 @@ placement matters.
 | Command | Result |
 | --- | --- |
 | `lh` | Open the interactive model picker |
+| `lh setup` | Guide Windows through LM Link or authenticated direct LAN |
 | `lh status` | Print system, route, server, auth, Codex, context, and model state |
 | `lh doctor` | Run setup checks and print concise fixes |
 | `lh --help` | Show usage and keys |
@@ -193,7 +238,9 @@ The XDG location takes precedence when set.
 Unknown keys are rejected. Origins cannot contain credentials, a path, query,
 or fragment. Never add a token to this file.
 
-Set the token only for the current shell. For example:
+`lh setup` and interactive `lh` can read a direct-LAN token with hidden input
+and keep it only for that process. For scripts, set the token only for the
+current shell. For example:
 
 ```sh
 export LM_API_TOKEN='replace-with-your-token'
@@ -228,13 +275,21 @@ reports `trained_for_tool_use=false` or omits the capability, but does not
 block launch. Test a real tool call before relying on a model for repository
 changes.
 
-## Kimi 3
+## Kimi K3
 
-Kimi 3 is the first documented target, not a special case in production code.
-The test suite uses a synthetic response named `Kimi 3` with a deliberately
-fake runtime key. It verifies native v1 model parsing, quantization and
-capabilities, exact 65,536-token loading, state transitions, TUI rendering, and
-Codex process construction.
+[Kimi's current documentation](https://www.kimi.com/code/docs/en/kimi-code/whats-new.html#kimi-k3-july-16-2026)
+describes Kimi K3 as a 2.8-trillion-parameter model with up to a 1M-token
+context. That scale is far beyond a 64 GB Mac, so the tested Mac setup uses
+LM Studio's
+[tool-trained `gpt-oss-20b`](https://lmstudio.ai/models/openai/gpt-oss-20b)
+instead. When LM Studio reports any future compatible Kimi variant that
+actually fits the machine, LocalHub will discover it without a code change.
+
+Kimi K3 remains the first documented target, not a special case in production
+code. The test suite uses a synthetic response named `Kimi 3` with a
+deliberately fake runtime key. It verifies native v1 model parsing,
+quantization and capabilities, exact 65,536-token loading, state transitions,
+TUI rendering, and Codex process construction.
 
 That fixture does not claim an official Kimi 3 catalog ID, prove that a
 particular quantization fits a machine, or replace live tool-call testing.
@@ -247,7 +302,7 @@ server, so the same path works for any compatible LLM.
 | --- | --- |
 | Cannot connect on Mac | Start LM Studio's Developer server or run `lms server start --port 1234` |
 | Windows local route fails | Start the Windows server; if using LM Link, confirm the link and preferred Mac |
-| Token missing or rejected | Set the variable named by `tokenEnv`; verify token permissions and recreate an expired/revoked token |
+| Token missing or rejected | Rerun `lh` for hidden entry, or set the variable named by `tokenEnv`; verify token permissions |
 | Mac hostname does not resolve | Fix local DNS/mDNS or use the Mac's LAN IP in `lanEndpoint` |
 | LAN route times out | Enable Serve on Local Network and allow TCP port `1234` through the Mac firewall |
 | Context is unsupported | Select a model with a larger maximum or lower `contextLength` |
@@ -267,7 +322,8 @@ Run `lh doctor` after each setup change.
 - Capability metadata is descriptive, not a guarantee of correct Codex tool
   calls.
 - LocalHub does not manage model downloads, LM Studio runtimes, server
-  lifecycle, links, firewalls, or Codex installation.
+  security settings, Mac firewall rules, or Codex installation. `lh setup`
+  only runs explicit Windows LM Studio link/server commands after prompting.
 
 ## Development
 
@@ -294,7 +350,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
   [load](https://lmstudio.ai/docs/developer/rest/load), and
   [unload](https://lmstudio.ai/docs/developer/rest/unload)
 - LM Studio [API authentication](https://lmstudio.ai/docs/developer/core/authentication),
-  [LM Link](https://lmstudio.ai/docs/developer/core/lmlink), and
+  [LM Link](https://lmstudio.ai/docs/lmlink),
+  [preferred devices](https://lmstudio.ai/docs/lmlink/basics/preferred-device),
+  and
   [Serve on Local Network](https://lmstudio.ai/docs/developer/core/server/serve-on-network)
 - LM Studio's [Codex integration](https://lmstudio.ai/docs/integrations/codex)
 - Codex [advanced configuration](https://developers.openai.com/codex/config-advanced)

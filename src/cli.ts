@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 
 import { buildCodexProcess, runCodex } from "./codex.ts";
-import { ConfigError, configPath, loadConfig } from "./config.ts";
+import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
 import { collectRuntime } from "./runtime.ts";
+import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
 import type { LocalHubConfig } from "./types.ts";
 
@@ -14,6 +15,7 @@ const HELP = `LocalHub ${VERSION}
 
 Usage:
   lh                 Open the model picker
+  lh setup           Configure Windows access with a guided wizard
   lh status          Show system, route, server, and model state
   lh doctor          Check setup and print concise fixes
   lh --help          Show this help
@@ -28,8 +30,8 @@ Configuration:
   macOS    ~/Library/Application Support/LocalHub/config.json
   Windows  %APPDATA%\\LocalHub\\config.json
 
-API tokens are never stored. Set the environment variable named by tokenEnv
-(default: LM_API_TOKEN) only in the shell that runs lh.
+API tokens are never stored. Windows setup and interactive launch can prompt
+with hidden input; scripts may set tokenEnv (default: LM_API_TOKEN).
 `;
 
 export interface CliDependencies {
@@ -38,9 +40,13 @@ export interface CliDependencies {
   configFile?: string;
   interactive?: boolean;
   load?: typeof loadConfig;
+  env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   runInteractive?: typeof runTui;
   runLocalCodex?: typeof runCodex;
+  readSecret?: typeof readHiddenInput;
+  runSetupWizard?: typeof runSetup;
+  save?: typeof saveConfig;
 }
 
 export async function main(
@@ -74,7 +80,10 @@ export async function main(
   if (command === "status" || command === "doctor") {
     let runtime: Awaited<ReturnType<typeof collectRuntime>>;
     try {
-      runtime = await (dependencies.collect ?? collectRuntime)(config);
+      runtime = await (dependencies.collect ?? collectRuntime)(config, {
+        ...(dependencies.platform === undefined ? {} : { platform: dependencies.platform }),
+        ...(dependencies.env === undefined ? {} : { env: dependencies.env }),
+      });
     } catch (error) {
       console.error(`State check failed: ${errorMessage(error)}`);
       console.error("Fix: verify this platform build, then retry `lh doctor`.");
@@ -91,6 +100,42 @@ export async function main(
 
   const platform = dependencies.platform ?? process.platform;
   const arch = dependencies.arch ?? process.arch;
+  const env = dependencies.env ?? process.env;
+  const interactive =
+    dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+  let sessionToken: string | undefined;
+  if (command === "setup") {
+    if (!interactive) {
+      console.error("The setup wizard needs an interactive terminal.");
+      return 2;
+    }
+    let setup: SetupResult;
+    try {
+      setup = await (dependencies.runSetupWizard ?? runSetup)(config, path, {
+        arch,
+        env,
+        platform,
+        saveConfig: (next) => (dependencies.save ?? saveConfig)(next, path),
+      });
+    } catch (error) {
+      console.error(`Setup failed: ${errorMessage(error)}`);
+      console.error("Fix the reported dependency or connection, then rerun `lh setup`.");
+      return 1;
+    }
+    if (setup.kind === "cancelled") {
+      return 0;
+    }
+    if (setup.kind === "incomplete") {
+      return 1;
+    }
+    config = setup.config;
+    sessionToken = setup.sessionToken;
+    if (!setup.launch) {
+      return setup.ready ? 0 : 1;
+    }
+  }
+
   if (
     (platform !== "darwin" && platform !== "win32") ||
     (platform === "darwin" && arch !== "arm64") ||
@@ -99,16 +144,45 @@ export async function main(
     console.error("LocalHub supports macOS arm64 and Windows x64.");
     return 2;
   }
-  const interactive =
-    dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!interactive) {
     console.error("The LocalHub TUI needs an interactive terminal. Run `lh status` instead.");
     return 2;
   }
 
+  if (command === "tui" && platform === "win32" && config.lanEndpoint && !env[config.tokenEnv]) {
+    let needsToken = false;
+    try {
+      const preflight = await (dependencies.collect ?? collectRuntime)(config, {
+        env,
+        platform,
+      });
+      needsToken = preflight.snapshot.attempts.some(
+        (attempt) => attempt.kind === "windows-lan" && attempt.auth === "missing",
+      );
+    } catch {
+      // The TUI owns detailed connection diagnostics when preflight itself fails.
+    }
+    if (needsToken) {
+      try {
+        sessionToken =
+          (await (dependencies.readSecret ?? readHiddenInput)(
+            `Direct-LAN token for ${new URL(config.lanEndpoint).hostname}`,
+          )) ?? undefined;
+      } catch (error) {
+        console.error(`Token input failed: ${errorMessage(error)}`);
+        return 1;
+      }
+      if (!sessionToken) {
+        console.error("Direct-LAN token entry cancelled. Run `lh` to retry.");
+        return 1;
+      }
+    }
+  }
+
   let result: Awaited<ReturnType<typeof runTui>>;
   try {
-    result = await (dependencies.runInteractive ?? runTui)(config, path);
+    const tuiEnv = sessionToken ? { ...env, [config.tokenEnv]: sessionToken } : env;
+    result = await (dependencies.runInteractive ?? runTui)(config, path, { env: tuiEnv });
   } catch (error) {
     console.error(`LocalHub TUI failed: ${errorMessage(error)}`);
     console.error("Fix: install the matching platform build and run `lh doctor`.");
@@ -118,6 +192,7 @@ export async function main(
     return 0;
   }
   const spec = buildCodexProcess({
+    baseEnv: env,
     codexPath: result.codexPath,
     modelId: result.modelId,
     endpoint: result.endpoint,
@@ -137,7 +212,7 @@ export async function main(
 
 function parseCommand(
   args: string[],
-): "tui" | "status" | "doctor" | "help" | "version" | "invalid" {
+): "tui" | "setup" | "status" | "doctor" | "help" | "version" | "invalid" {
   if (args.length === 0) {
     return "tui";
   }
@@ -149,6 +224,8 @@ function parseCommand(
       return "status";
     case "doctor":
       return "doctor";
+    case "setup":
+      return "setup";
     case "help":
     case "--help":
     case "-h":

@@ -42,6 +42,7 @@ export interface TuiLayout {
 export interface TuiDependencies {
   createRenderer?: typeof createCliRenderer;
   collect?: typeof collectRuntime;
+  env?: NodeJS.ProcessEnv;
   ensureLoaded?: typeof ensureModelLoaded;
   unload?: typeof unloadModel;
   saveSelection?: typeof saveSelectedModel;
@@ -195,6 +196,7 @@ export async function runTui(
   const ensureLoaded = dependencies.ensureLoaded ?? ensureModelLoaded;
   const unloadSelected = dependencies.unload ?? unloadModel;
   const saveSelection = dependencies.saveSelection ?? saveSelectedModel;
+  const env = dependencies.env ?? process.env;
   const renderer = await createRenderer({
     screenMode: "alternate-screen",
     exitOnCtrlC: false,
@@ -229,7 +231,7 @@ export async function runTui(
     const controller = new AbortController();
     activeController = controller;
     try {
-      const collected = await collect(config, { signal: controller.signal });
+      const collected = await collect(config, { env, signal: controller.signal });
       if (stopping || controller.signal.aborted) {
         return;
       }
@@ -400,7 +402,7 @@ export async function runTui(
       if (!instanceId) {
         return;
       }
-      const token = route.auth === "accepted" ? process.env[config.tokenEnv] : undefined;
+      const token = route.auth === "accepted" ? env[config.tokenEnv] : undefined;
       finish({
         kind: "launch",
         codexPath,

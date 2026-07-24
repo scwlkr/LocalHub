@@ -20,13 +20,14 @@ unless LocalHub causes the issue.
 LocalHub does not store API tokens. Configuration rejects credentials embedded
 in endpoint URLs and rejects unknown keys, including a `token` key.
 
-- Put the token only in the environment variable named by `tokenEnv`
-  (`LM_API_TOKEN` by default).
+- Enter the token at LocalHub's hidden prompt, or put it only in the
+  environment variable named by `tokenEnv` (`LM_API_TOKEN` by default).
 - Use a dedicated LM Studio token with only the permissions needed to list,
   load, unload, and run models.
 - Do not commit tokens, paste them into issue logs, or place them in
   `config.json`.
-- LocalHub forwards the token to the launched Codex child as
+- Hidden input and wizard tokens remain in memory for that LocalHub process.
+  LocalHub forwards the token to the launched Codex child as
   `LOCALHUB_LMSTUDIO_TOKEN`; the token is not placed in Codex arguments or
   written to Codex configuration.
 

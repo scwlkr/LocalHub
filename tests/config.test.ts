@@ -8,6 +8,7 @@ import {
   defaultConfig,
   loadConfig,
   parseConfig,
+  saveConfig,
   saveSelectedModel,
 } from "../src/config.ts";
 
@@ -83,5 +84,30 @@ describe("configuration", () => {
     if (process.platform !== "win32") {
       expect((await stat(path)).mode & 0o777).toBe(0o600);
     }
+  });
+
+  test("atomically saves a complete non-secret wizard configuration", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "localhub-config-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "config.json");
+
+    await saveConfig(
+      {
+        contextLength: 65_536,
+        localEndpoint: "http://127.0.0.1:1234",
+        lanEndpoint: "http://studio-mac.local:1234",
+        tokenEnv: "LOCALHUB_SESSION_TOKEN",
+        selectedModel: "catalog/model-key",
+      },
+      path,
+    );
+
+    expect(await loadConfig(path)).toEqual({
+      contextLength: 65_536,
+      localEndpoint: "http://127.0.0.1:1234",
+      lanEndpoint: "http://studio-mac.local:1234",
+      tokenEnv: "LOCALHUB_SESSION_TOKEN",
+      selectedModel: "catalog/model-key",
+    });
   });
 });
