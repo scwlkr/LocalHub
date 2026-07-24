@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
 import type { FetchLike } from "../src/lmstudio.ts";
 import { resolveRoute, routeCandidates } from "../src/routing.ts";
-import { jsonResponse, modelsPayload } from "./fixtures.ts";
+import { jsonResponse, kimiModel, modelsPayload } from "./fixtures.ts";
 
 describe("routing", () => {
   test("macOS only targets the local server", () => {
@@ -101,5 +101,72 @@ describe("routing", () => {
     expect(authHeaders).toEqual([null, "Bearer valid"]);
     expect(resolved.active?.auth).toBe("accepted");
     expect(resolved.active?.device).toBe("studio-mac");
+  });
+
+  test("Windows falls back to direct LAN when the local endpoint has no LLM", async () => {
+    const calls: string[] = [];
+    const resolved = await resolveRoute({
+      platform: "win32",
+      config: {
+        ...defaultConfig(),
+        lanEndpoint: "http://macbook.local:1234",
+      },
+      env: { LM_API_TOKEN: "secret" },
+      fetch: async (input) => {
+        calls.push(String(input));
+        return String(input).startsWith("http://127.0.0.1")
+          ? jsonResponse({ models: [] })
+          : jsonResponse(modelsPayload());
+      },
+    });
+
+    expect(resolved.active?.kind).toBe("windows-lan");
+    expect(resolved.models[0]?.displayName).toBe("Kimi 3");
+    expect(calls).toEqual([
+      "http://127.0.0.1:1234/api/v1/models",
+      "http://macbook.local:1234/api/v1/models",
+    ]);
+  });
+
+  test("Windows falls back to direct LAN when the preferred model is not local", async () => {
+    const resolved = await resolveRoute({
+      platform: "win32",
+      config: {
+        ...defaultConfig(),
+        selectedModel: "catalog/runtime-kimi-3-q4",
+        lanEndpoint: "http://macbook.local:1234",
+      },
+      env: { LM_API_TOKEN: "secret" },
+      fetch: async (input) =>
+        String(input).startsWith("http://127.0.0.1")
+          ? jsonResponse(modelsPayload(kimiModel({ key: "local/other-model" })))
+          : jsonResponse(modelsPayload()),
+    });
+
+    expect(resolved.active?.kind).toBe("windows-lan");
+    expect(resolved.models[0]?.key).toBe("catalog/runtime-kimi-3-q4");
+  });
+
+  test("keeps a reachable local endpoint when LAN fallback is unavailable", async () => {
+    const resolved = await resolveRoute({
+      platform: "win32",
+      config: {
+        ...defaultConfig(),
+        lanEndpoint: "http://macbook.local:1234",
+      },
+      env: {},
+      fetch: async () => jsonResponse({ models: [] }),
+    });
+
+    expect(resolved.active?.kind).toBe("windows-lmlink");
+    expect(resolved.models).toEqual([]);
+    expect(resolved.attempts).toEqual([
+      expect.objectContaining({ kind: "windows-lmlink", ok: true }),
+      expect.objectContaining({
+        kind: "windows-lan",
+        ok: false,
+        auth: "missing",
+      }),
+    ]);
   });
 });

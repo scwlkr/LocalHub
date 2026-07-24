@@ -62,6 +62,8 @@ export function buildCodexProcess(options: CodexProcessOptions): CodexProcessSpe
     "--config",
     'web_search="disabled"',
     "--config",
+    "shell_environment_policy.ignore_default_excludes=false",
+    "--config",
     `model_providers.${PROVIDER_ID}=${toTomlInlineTable(provider)}`,
   ];
   const env: Record<string, string | undefined> = { ...(options.baseEnv ?? process.env) };

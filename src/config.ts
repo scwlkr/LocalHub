@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, posix, win32 } from "node:path";
 import {
   DEFAULT_CONTEXT_LENGTH,
   DEFAULT_ENDPOINT,
@@ -29,6 +29,7 @@ export function configPath(
   env: NodeJS.ProcessEnv = process.env,
   userHome = homedir(),
 ): string {
+  const join = platform === "win32" ? win32.join : posix.join;
   if (env.XDG_CONFIG_HOME) {
     return join(env.XDG_CONFIG_HOME, "localhub", "config.json");
   }

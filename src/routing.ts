@@ -55,6 +55,7 @@ export async function resolveRoute(options: {
   const env = options.env ?? process.env;
   const token = env[options.config.tokenEnv];
   const attempts: RouteAttempt[] = [];
+  let deferredLocal: ResolvedRoute | null = null;
 
   for (const candidate of routeCandidates(platform, options.config)) {
     if (candidate.tokenRequired && !token) {
@@ -78,20 +79,20 @@ export async function resolveRoute(options: {
       });
       try {
         const models = await authenticated.listModels();
-        return {
-          active: activeRoute(candidate, "accepted", platform, options.hostname),
-          attempts: [
-            ...attempts,
-            {
-              kind: candidate.kind,
-              endpoint: candidate.endpoint,
-              auth: "accepted",
-              ok: true,
-            },
-          ],
-          client: authenticated,
+        const resolved = successfulResolution(
+          candidate,
+          "accepted",
+          platform,
+          options.hostname,
+          authenticated,
           models,
-        };
+          attempts,
+        );
+        if (shouldTryLanFallback(candidate, options.config, models)) {
+          deferredLocal = resolved;
+          continue;
+        }
+        return resolved;
       } catch (error) {
         const auth = isAuthenticationError(error) ? "rejected" : "unknown";
         attempts.push(failedAttempt(candidate, error, auth, options.config.tokenEnv));
@@ -105,20 +106,20 @@ export async function resolveRoute(options: {
     });
     try {
       const models = await unauthenticated.listModels();
-      return {
-        active: activeRoute(candidate, "not-required", platform, options.hostname),
-        attempts: [
-          ...attempts,
-          {
-            kind: candidate.kind,
-            endpoint: candidate.endpoint,
-            auth: "not-required",
-            ok: true,
-          },
-        ],
-        client: unauthenticated,
+      const resolved = successfulResolution(
+        candidate,
+        "not-required",
+        platform,
+        options.hostname,
+        unauthenticated,
         models,
-      };
+        attempts,
+      );
+      if (shouldTryLanFallback(candidate, options.config, models)) {
+        deferredLocal = resolved;
+        continue;
+      }
+      return resolved;
     } catch (error) {
       if (!isAuthenticationError(error)) {
         attempts.push(failedAttempt(candidate, error, "unknown", options.config.tokenEnv));
@@ -137,27 +138,67 @@ export async function resolveRoute(options: {
     });
     try {
       const models = await authenticated.listModels();
-      return {
-        active: activeRoute(candidate, "accepted", platform, options.hostname),
-        attempts: [
-          ...attempts,
-          {
-            kind: candidate.kind,
-            endpoint: candidate.endpoint,
-            auth: "accepted",
-            ok: true,
-          },
-        ],
-        client: authenticated,
+      const resolved = successfulResolution(
+        candidate,
+        "accepted",
+        platform,
+        options.hostname,
+        authenticated,
         models,
-      };
+        attempts,
+      );
+      if (shouldTryLanFallback(candidate, options.config, models)) {
+        deferredLocal = resolved;
+        continue;
+      }
+      return resolved;
     } catch (error) {
       const auth = isAuthenticationError(error) ? "rejected" : "unknown";
       attempts.push(failedAttempt(candidate, error, auth, options.config.tokenEnv));
     }
   }
 
+  if (deferredLocal) {
+    return { ...deferredLocal, attempts };
+  }
   return { active: null, attempts, client: null, models: [] };
+}
+
+function successfulResolution(
+  candidate: Candidate,
+  auth: AuthState,
+  platform: NodeJS.Platform,
+  overrideHostname: string | undefined,
+  client: LmStudioClient,
+  models: ModelInfo[],
+  attempts: RouteAttempt[],
+): ResolvedRoute {
+  attempts.push({
+    kind: candidate.kind,
+    endpoint: candidate.endpoint,
+    auth,
+    ok: true,
+  });
+  return {
+    active: activeRoute(candidate, auth, platform, overrideHostname),
+    attempts: [...attempts],
+    client,
+    models,
+  };
+}
+
+function shouldTryLanFallback(
+  candidate: Candidate,
+  config: LocalHubConfig,
+  models: ModelInfo[],
+): boolean {
+  if (candidate.kind !== "windows-lmlink" || !config.lanEndpoint) {
+    return false;
+  }
+  const llms = models.filter((model) => model.type === "llm");
+  return config.selectedModel
+    ? !llms.some((model) => model.key === config.selectedModel)
+    : llms.length === 0;
 }
 
 function activeRoute(

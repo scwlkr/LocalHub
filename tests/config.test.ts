@@ -25,7 +25,7 @@ describe("configuration", () => {
       "/Users/test/Library/Application Support/LocalHub/config.json",
     );
     expect(configPath("win32", { APPDATA: "C:\\Users\\test\\AppData\\Roaming" }, "ignored")).toBe(
-      "C:\\Users\\test\\AppData\\Roaming/LocalHub/config.json",
+      "C:\\Users\\test\\AppData\\Roaming\\LocalHub\\config.json",
     );
     expect(configPath("darwin", { XDG_CONFIG_HOME: "/custom" }, "/Users/test")).toBe(
       "/custom/localhub/config.json",

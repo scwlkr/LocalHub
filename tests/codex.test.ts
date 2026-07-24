@@ -42,6 +42,9 @@ describe("Codex process construction", () => {
     expect(spec.command.join(" ")).toContain('env_key="LOCALHUB_LMSTUDIO_TOKEN"');
     expect(spec.command.join(" ")).toContain('service_tier="default"');
     expect(spec.command.join(" ")).toContain('web_search="disabled"');
+    expect(spec.command.join(" ")).toContain(
+      "shell_environment_policy.ignore_default_excludes=false",
+    );
     expect(spec.env.LOCALHUB_LMSTUDIO_TOKEN).toBe("super-secret");
     expect(spec.env.PRIVATE_LM_KEY).toBeUndefined();
   });

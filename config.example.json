@@ -1,0 +1,6 @@
+{
+  "contextLength": 65536,
+  "localEndpoint": "http://127.0.0.1:1234",
+  "lanEndpoint": "http://macbook.local:1234",
+  "tokenEnv": "LM_API_TOKEN"
+}

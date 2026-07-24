@@ -77,10 +77,14 @@ export class LmStudioClient {
   }
 
   async unloadInstance(instanceId: string): Promise<string> {
-    const body = await this.#request("/api/v1/models/unload", {
-      method: "POST",
-      body: JSON.stringify({ instance_id: instanceId }),
-    });
+    const body = await this.#request(
+      "/api/v1/models/unload",
+      {
+        method: "POST",
+        body: JSON.stringify({ instance_id: instanceId }),
+      },
+      60_000,
+    );
     if (!isObject(body) || typeof body.instance_id !== "string") {
       throw new LmStudioError("invalid-response", "LM Studio returned an invalid unload response.");
     }
