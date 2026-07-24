@@ -73,24 +73,34 @@ This builds, smoke-tests, and installs
 per-user `PATH` when needed. Open a new terminal if `lh` is not found
 immediately.
 
-### Tested Mac path
+### Mac validation target
 
-The following is the tested 64 GB Apple-silicon path. `gpt-oss-20b` is a
-reference model, not a hardcoded LocalHub dependency:
+The recommended initial validation target on a 64 GB Apple-silicon Mac is the
+exact 29.1 GB MLX 6-bit build of Qwen3.6 35B-A3B. It is a documentation and
+integration-test target, not a hardcoded LocalHub dependency:
 
 ```sh
-lms get openai/gpt-oss-20b --mlx --yes
-lms load openai/gpt-oss-20b --gpu max --context-length 65536 --estimate-only --yes
+lms get "https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit" --mlx --yes
+lms load --estimate-only qwen3.6-35b-a3b-mlx --gpu max --context-length 65536
 lms server start --port 1234
 lh doctor
 lh
 ```
 
-In `lh`, press `l` to load at 65,536 tokens or `Enter`/`c` to load and launch
-Codex. On the tested M1 Max, LM Studio estimated 15.78 GiB total memory for
-this load. The live checks confirmed 131,072 maximum context, native tool-use
-metadata, a Responses API function call, and a Codex shell tool call in the
-calling directory.
+In `lh`, highlight `Qwen3.6 35B A3B`, confirm the selected variant is the
+requested 6-bit MLX artifact, and press `l` to load at 65,536 tokens.
+`Enter`/`c` loads when needed and launches Codex. The official LM Studio
+recipe enables thinking and disables preserve-thinking by default; LocalHub
+does not inject model-specific overrides.
+
+> **Current MLX blocker (verified July 24, 2026):** LM Studio 0.4.20 with
+> MLX runtime 1.10.1 accepts the 65,536 request for this model but auto-fits
+> the loaded runtime to a different context. LocalHub fails closed on that
+> mismatch. This behavior is covered by
+> [LM Studio bug #2191](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/2191).
+> The live Responses, Codex tool-loop, and Windows serving checks remain
+> blocked until LM Studio supplies a supported way to honor the exact
+> context.
 
 ### Windows path
 
@@ -275,26 +285,29 @@ reports `trained_for_tool_use=false` or omits the capability, but does not
 block launch. Test a real tool call before relying on a model for repository
 changes.
 
-## Kimi K3
+## Initial validation model: Qwen3.6
 
-[Kimi's current documentation](https://www.kimi.com/code/docs/en/kimi-code/whats-new.html#kimi-k3-july-16-2026)
-describes Kimi K3 as a 2.8-trillion-parameter model with up to a 1M-token
-context. That scale is far beyond a 64 GB Mac, so the tested Mac setup uses
-LM Studio's
-[tool-trained `gpt-oss-20b`](https://lmstudio.ai/models/openai/gpt-oss-20b)
-instead. When LM Studio reports any future compatible Kimi variant that
-actually fits the machine, LocalHub will discover it without a code change.
+The recommended first-run model is
+[`qwen/qwen3.6-35b-a3b`](https://lmstudio.ai/models/qwen/qwen3.6-35b-a3b),
+using exactly
+[`lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit`](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit).
+The upstream base model has 35 billion total parameters, activates 3 billion
+per token, and supports 262,144 tokens. The requested LocalHub runtime uses
+65,536 tokens, thinking on, preserve-thinking off, and the Apple-silicon MLX
+runtime. Qwen recommends at least 128K context for maximum thinking headroom;
+65,536 remains within the model's supported context and is the intentional
+LocalHub validation setting.
 
-Kimi K3 remains the first documented target, not a special case in production
-code. The test suite uses a synthetic response named `Kimi 3` with a
-deliberately fake runtime key. It verifies native v1 model parsing,
-quantization and capabilities, exact 65,536-token loading, state transitions,
-TUI rendering, and Codex process construction.
+The synthetic test fixture mirrors the exact target's catalog metadata and verifies
+native v1 parsing, MLX/6-bit presentation, reasoning defaults, exact
+65,536-token loading, state transitions, routing, TUI rendering, and Codex
+process construction. It does not make production model selection special.
 
-That fixture does not claim an official Kimi 3 catalog ID, prove that a
-particular quantization fits a machine, or replace live tool-call testing.
-LocalHub always uses the keys and capabilities returned by your LM Studio
-server, so the same path works for any compatible LLM.
+Live Responses and Codex tool-loop checks remain integration tests because
+mocked unit tests cannot prove inference quality. LocalHub always uses model
+keys, loaded instance IDs, variants, and capabilities returned by LM Studio,
+so another compatible installed LLM follows the same path without a code
+change.
 
 ## Troubleshooting
 
@@ -355,6 +368,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
   and
   [Serve on Local Network](https://lmstudio.ai/docs/developer/core/server/serve-on-network)
 - LM Studio's [Codex integration](https://lmstudio.ai/docs/integrations/codex)
+- LM Studio's
+  [Qwen3.6 35B-A3B recipe](https://lmstudio.ai/models/qwen/qwen3.6-35b-a3b)
+  and the exact
+  [MLX 6-bit artifact](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit)
+- Qwen's
+  [Qwen3.6 35B-A3B model card](https://huggingface.co/Qwen/Qwen3.6-35B-A3B)
 - Codex [advanced configuration](https://developers.openai.com/codex/config-advanced)
   and [configuration reference](https://developers.openai.com/codex/config-reference)
 - OpenTUI [standalone executable guidance](https://opentui.com/docs/reference/standalone-executables/)

@@ -5,9 +5,9 @@ import { defaultConfig } from "../src/config.ts";
 import type { RuntimeContext, RuntimeSnapshot } from "../src/runtime.ts";
 import { initialTuiState, reduceTuiState } from "../src/state.ts";
 import { createTuiLayout, runTui, updateTuiLayout } from "../src/tui.ts";
-import { kimiModel } from "./fixtures.ts";
+import { qwenModel } from "./fixtures.ts";
 
-test("OpenTUI layout renders runtime Kimi details and all action hints", async () => {
+test("OpenTUI layout renders runtime Qwen details and all action hints", async () => {
   const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({
     width: 90,
     height: 24,
@@ -32,7 +32,7 @@ test("OpenTUI layout renders runtime Kimi details and all action hints", async (
         auth: "not-required",
       },
       attempts: [],
-      models: [kimiModel()],
+      models: [qwenModel()],
     };
     const state = reduceTuiState(initialTuiState(), {
       type: "refresh-succeeded",
@@ -43,8 +43,8 @@ test("OpenTUI layout renders runtime Kimi details and all action hints", async (
     await renderOnce();
     const frame = captureCharFrame();
 
-    expect(frame).toContain("Kimi 3");
-    expect(frame).toContain("catalog/runtime-kimi-3-q4");
+    expect(frame).toContain("Qwen3.6 35B A3B");
+    expect(frame).toContain("qwen/qwen3.6-35b-a3b");
     expect(frame).toContain("65,536");
     expect(frame).toContain("default on");
     expect(frame).toContain("load/reload");
@@ -58,7 +58,7 @@ test("model options refresh when load state changes without changing keys", asyn
   const { renderer } = await createTestRenderer({ width: 90, height: 24 });
   try {
     const layout = createTuiLayout(renderer);
-    const snapshot = runtimeSnapshot([kimiModel()]);
+    const snapshot = runtimeSnapshot([qwenModel()]);
     const state = reduceTuiState(initialTuiState(), {
       type: "refresh-succeeded",
       snapshot,
@@ -68,8 +68,8 @@ test("model options refresh when load state changes without changing keys", asyn
     expect(layout.models.options[0]?.name).toStartWith("○");
 
     const loadedSnapshot = runtimeSnapshot([
-      kimiModel({
-        loadedInstances: [{ id: "kimi-loaded", contextLength: 65_536 }],
+      qwenModel({
+        loadedInstances: [{ id: "qwen-loaded", contextLength: 65_536 }],
       }),
     ]);
     const loadedState = reduceTuiState(state, {
@@ -92,12 +92,12 @@ test("diagnostics use the highlighted model and can scroll to every check", asyn
   });
   try {
     const layout = createTuiLayout(renderer);
-    const first = kimiModel({
+    const first = qwenModel({
       key: "test/first",
       displayName: "First model",
       loadedInstances: [{ id: "first-loaded", contextLength: 65_536 }],
     });
-    const second = kimiModel({
+    const second = qwenModel({
       key: "test/second",
       displayName: "Highlighted model",
       capabilities: {
@@ -181,7 +181,7 @@ test("launch continues when saving the model preference fails", async () => {
   const ready = new Promise<void>((resolve) => {
     markReady = resolve;
   });
-  const model = kimiModel();
+  const model = qwenModel();
   try {
     const resultPromise = runTui(defaultConfig(), "/read-only/config.json", {
       createRenderer: async () => renderer,
@@ -195,7 +195,7 @@ test("launch continues when saving the model preference fails", async () => {
       ensureLoaded: async () => ({
         instanceId: "loaded-instance",
         models: [
-          kimiModel({
+          qwenModel({
             loadedInstances: [{ id: "loaded-instance", contextLength: 65_536 }],
           }),
         ],

@@ -1,31 +1,31 @@
 import type { ModelInfo } from "../src/types.ts";
 
-export function kimiModel(overrides: Partial<ModelInfo> = {}): ModelInfo {
+export function qwenModel(overrides: Partial<ModelInfo> = {}): ModelInfo {
   return {
     type: "llm",
-    publisher: "moonshotai",
-    key: "catalog/runtime-kimi-3-q4",
-    displayName: "Kimi 3",
-    architecture: "kimi",
-    quantization: { name: "Q4_K_M", bitsPerWeight: 4.5 },
-    sizeBytes: 40_000_000_000,
-    paramsString: "test-fixture",
+    publisher: "qwen",
+    key: "qwen/qwen3.6-35b-a3b",
+    displayName: "Qwen3.6 35B A3B",
+    architecture: "qwen3_5_moe",
+    quantization: { name: "6bit", bitsPerWeight: 6 },
+    sizeBytes: 29_081_792_392,
+    paramsString: "35B-A3B",
     loadedInstances: [],
     maxContextLength: 262_144,
-    format: "gguf",
+    format: "mlx",
     capabilities: {
-      vision: false,
+      vision: true,
       trainedForToolUse: true,
-      reasoning: { allowedOptions: ["on"], default: "on" },
+      reasoning: { allowedOptions: ["off", "on"], default: "on" },
     },
-    description: "Synthetic fixture; not a hardcoded catalog entry.",
-    variants: [],
-    selectedVariant: null,
+    description: "Initial validation fixture; production discovery remains model-agnostic.",
+    variants: ["lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit"],
+    selectedVariant: "lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit",
     ...overrides,
   };
 }
 
-export function modelsPayload(model = kimiModel()): unknown {
+export function modelsPayload(model = qwenModel()): unknown {
   return {
     models: [
       {

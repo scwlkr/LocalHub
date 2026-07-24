@@ -75,11 +75,11 @@ describe("configuration", () => {
 
     const config = await loadConfig(path);
     expect(config.contextLength).toBe(65_536);
-    await saveSelectedModel("catalog/runtime-kimi-3-q4", config, path);
+    await saveSelectedModel("qwen/qwen3.6-35b-a3b", config, path);
 
     expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
       ...config,
-      selectedModel: "catalog/runtime-kimi-3-q4",
+      selectedModel: "qwen/qwen3.6-35b-a3b",
     });
     if (process.platform !== "win32") {
       expect((await stat(path)).mode & 0o777).toBe(0o600);

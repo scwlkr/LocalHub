@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
 import { diagnose, toolCompatibilityCheck } from "../src/diagnostics.ts";
 import type { RuntimeSnapshot } from "../src/runtime.ts";
-import { kimiModel } from "./fixtures.ts";
+import { qwenModel } from "./fixtures.ts";
 
 describe("diagnostics", () => {
   test("does not claim inventory state while the server is offline", () => {
@@ -45,7 +45,7 @@ describe("diagnostics", () => {
   test("warns instead of blocking when tool compatibility is poor", () => {
     expect(
       toolCompatibilityCheck(
-        kimiModel({
+        qwenModel({
           capabilities: {
             vision: false,
             trainedForToolUse: false,
@@ -62,12 +62,12 @@ describe("diagnostics", () => {
   });
 
   test("checks context against the selected model instead of any installed model", () => {
-    const short = kimiModel({
+    const short = qwenModel({
       key: "test/short",
       displayName: "Short model",
       maxContextLength: 32_768,
     });
-    const long = kimiModel({ key: "test/long", displayName: "Long model" });
+    const long = qwenModel({ key: "test/long", displayName: "Long model" });
     const checks = diagnose(onlineSnapshot([short, long]), {
       ...defaultConfig(),
       selectedModel: short.key,
@@ -120,7 +120,7 @@ describe("diagnostics", () => {
   });
 
   test("fails an unsupported architecture on an otherwise supported OS", () => {
-    const snapshot = onlineSnapshot([kimiModel()]);
+    const snapshot = onlineSnapshot([qwenModel()]);
     snapshot.system.arch = "x64";
 
     expect(diagnose(snapshot, defaultConfig())).toContainEqual(

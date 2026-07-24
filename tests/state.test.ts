@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeSnapshot } from "../src/runtime.ts";
 import { initialTuiState, reduceTuiState } from "../src/state.ts";
-import { kimiModel } from "./fixtures.ts";
+import { qwenModel } from "./fixtures.ts";
 
 const snapshot: RuntimeSnapshot = {
   system: {
@@ -21,17 +21,17 @@ const snapshot: RuntimeSnapshot = {
     auth: "not-required",
   },
   attempts: [],
-  models: [kimiModel()],
+  models: [qwenModel()],
 };
 
 describe("TUI state transitions", () => {
   test("refresh keeps a valid preference and reaches ready", () => {
-    const state = reduceTuiState(initialTuiState("catalog/runtime-kimi-3-q4"), {
+    const state = reduceTuiState(initialTuiState("qwen/qwen3.6-35b-a3b"), {
       type: "refresh-succeeded",
       snapshot,
     });
     expect(state.phase).toBe("ready");
-    expect(state.selectedModel).toBe("catalog/runtime-kimi-3-q4");
+    expect(state.selectedModel).toBe("qwen/qwen3.6-35b-a3b");
     expect(state.operation).toBeNull();
   });
 
@@ -40,7 +40,7 @@ describe("TUI state transitions", () => {
       type: "refresh-succeeded",
       snapshot,
     });
-    expect(state.selectedModel).toBe("catalog/runtime-kimi-3-q4");
+    expect(state.selectedModel).toBe("qwen/qwen3.6-35b-a3b");
   });
 
   test("tracks operation and error state", () => {

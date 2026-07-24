@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ensureModelLoaded, unloadModel } from "../src/runtime.ts";
-import { kimiModel } from "./fixtures.ts";
+import { qwenModel } from "./fixtures.ts";
 
 describe("model state operations", () => {
   test("reuses an instance already loaded at the requested context", async () => {
-    const model = kimiModel({
+    const model = qwenModel({
       loadedInstances: [{ id: "ready", contextLength: 65_536 }],
     });
     const calls: string[] = [];
@@ -32,10 +32,10 @@ describe("model state operations", () => {
   });
 
   test("reloads the selected model and verifies the exact context", async () => {
-    const original = kimiModel({
+    const original = qwenModel({
       loadedInstances: [{ id: "old", contextLength: 8_192 }],
     });
-    const refreshed = kimiModel({
+    const refreshed = qwenModel({
       loadedInstances: [{ id: "new", contextLength: 65_536 }],
     });
     const calls: string[] = [];
@@ -83,7 +83,7 @@ describe("model state operations", () => {
             return [];
           },
         },
-        kimiModel({
+        qwenModel({
           maxContextLength: 32_768,
           loadedInstances: [{ id: "working", contextLength: 32_768 }],
         }),
@@ -99,9 +99,9 @@ describe("model state operations", () => {
         {
           unloadInstance: async (id) => id,
           loadModel: async () => ({ instanceId: "new" }),
-          listModels: async () => [kimiModel()],
+          listModels: async () => [qwenModel()],
         },
-        kimiModel(),
+        qwenModel(),
         65_536,
       ),
     ).rejects.toThrow("did not confirm");
@@ -109,7 +109,7 @@ describe("model state operations", () => {
 
   test("unloads every selected-model instance and verifies state", async () => {
     const calls: string[] = [];
-    const model = kimiModel({
+    const model = qwenModel({
       loadedInstances: [
         { id: "one", contextLength: 8_192 },
         { id: "two", contextLength: 65_536 },
@@ -123,11 +123,11 @@ describe("model state operations", () => {
             return id;
           },
           loadModel: async () => ({ instanceId: "unused" }),
-          listModels: async () => [kimiModel()],
+          listModels: async () => [qwenModel()],
         },
         model,
       ),
-    ).toEqual([kimiModel()]);
+    ).toEqual([qwenModel()]);
     expect(calls).toEqual(["one", "two"]);
   });
 });

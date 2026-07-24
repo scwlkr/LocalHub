@@ -10,7 +10,7 @@ import {
   type SetupIO,
 } from "../src/setup.ts";
 import type { LocalHubConfig } from "../src/types.ts";
-import { jsonResponse, kimiModel, modelsPayload } from "./fixtures.ts";
+import { jsonResponse, qwenModel, modelsPayload } from "./fixtures.ts";
 
 describe("setup wizard", () => {
   test("configures direct LAN, persists no secret, and returns a launch-only token", async () => {
@@ -35,7 +35,7 @@ describe("setup wizard", () => {
       probeLan: async (endpoint, token) => {
         expect(endpoint).toBe("http://macbook.local:1234");
         expect(token).toBe(secret);
-        return [kimiModel()];
+        return [qwenModel()];
       },
       saveConfig: async (config) => {
         saved.push(structuredClone(config));
@@ -47,7 +47,7 @@ describe("setup wizard", () => {
       {
         ...defaultConfig(),
         lanEndpoint: "http://macbook.local:1234",
-        selectedModel: "catalog/runtime-kimi-3-q4",
+        selectedModel: "qwen/qwen3.6-35b-a3b",
       },
     ]);
     const savedConfig = saved[0];
@@ -81,7 +81,7 @@ describe("setup wizard", () => {
       probeLocal: async () => [],
       probeLan: async (_endpoint, token) => {
         expect(token).toBe(secret);
-        return [kimiModel()];
+        return [qwenModel()];
       },
       saveConfig: async (config) => {
         saved.push(structuredClone(config));
@@ -154,7 +154,7 @@ describe("setup wizard", () => {
         if (probes < 3) {
           throw new Error("server offline");
         }
-        return [kimiModel()];
+        return [qwenModel()];
       },
       saveConfig: async (config) => {
         saved.push(structuredClone(config));
@@ -168,7 +168,7 @@ describe("setup wizard", () => {
       ["C:\\bin\\lms.exe", "link", "set-preferred-device"],
       ["C:\\bin\\lms.exe", "server", "start", "--port", "1234"],
     ]);
-    expect(saved[0]?.selectedModel).toBe("catalog/runtime-kimi-3-q4");
+    expect(saved[0]?.selectedModel).toBe("qwen/qwen3.6-35b-a3b");
     expect(result).toEqual(
       expect.objectContaining({
         kind: "configured",
@@ -194,7 +194,7 @@ describe("setup wizard", () => {
         return 0;
       },
       readLinkStatus: async () => ({ status: "online", issues: [] }),
-      probeLocal: async () => [kimiModel()],
+      probeLocal: async () => [qwenModel()],
       saveConfig: async () => undefined,
     });
 
@@ -250,7 +250,7 @@ describe("setup wizard", () => {
       findExecutable: () => "codex.exe",
       runCommand: async () => 0,
       probeLocal: async () => [],
-      probeLan: async () => [kimiModel({ maxContextLength: 32_768 })],
+      probeLan: async () => [qwenModel({ maxContextLength: 32_768 })],
       saveConfig: async () => undefined,
     });
 
@@ -299,7 +299,7 @@ describe("authenticated direct-LAN probe", () => {
     });
 
     expect(authorizations).toEqual([null, "Bearer secret"]);
-    expect(models[0]?.displayName).toBe("Kimi 3");
+    expect(models[0]?.displayName).toBe("Qwen3.6 35B A3B");
   });
 
   test("refuses an anonymously accessible Mac without exposing the token", async () => {

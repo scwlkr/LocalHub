@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { defaultConfig } from "../src/config.ts";
 import type { FetchLike } from "../src/lmstudio.ts";
 import { resolveRoute, routeCandidates } from "../src/routing.ts";
-import { jsonResponse, kimiModel, modelsPayload } from "./fixtures.ts";
+import { jsonResponse, qwenModel, modelsPayload } from "./fixtures.ts";
 
 describe("routing", () => {
   test("macOS only targets the local server", () => {
@@ -131,7 +131,7 @@ describe("routing", () => {
     });
 
     expect(resolved.active?.kind).toBe("windows-lan");
-    expect(resolved.models[0]?.displayName).toBe("Kimi 3");
+    expect(resolved.models[0]?.displayName).toBe("Qwen3.6 35B A3B");
     expect(calls).toEqual([
       "http://127.0.0.1:1234/api/v1/models",
       "http://macbook.local:1234/api/v1/models",
@@ -144,13 +144,13 @@ describe("routing", () => {
       platform: "win32",
       config: {
         ...defaultConfig(),
-        selectedModel: "catalog/runtime-kimi-3-q4",
+        selectedModel: "qwen/qwen3.6-35b-a3b",
         lanEndpoint: "http://macbook.local:1234",
       },
       env: { LM_API_TOKEN: "secret" },
       fetch: async (input, init) => {
         if (String(input).startsWith("http://127.0.0.1")) {
-          return jsonResponse(modelsPayload(kimiModel({ key: "local/other-model" })));
+          return jsonResponse(modelsPayload(qwenModel({ key: "local/other-model" })));
         }
         return new Headers(init?.headers).has("Authorization")
           ? jsonResponse(modelsPayload())
@@ -159,7 +159,7 @@ describe("routing", () => {
     });
 
     expect(resolved.active?.kind).toBe("windows-lan");
-    expect(resolved.models[0]?.key).toBe("catalog/runtime-kimi-3-q4");
+    expect(resolved.models[0]?.key).toBe("qwen/qwen3.6-35b-a3b");
   });
 
   test("keeps a reachable local endpoint when LAN fallback is unavailable", async () => {

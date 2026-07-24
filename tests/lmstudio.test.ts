@@ -6,16 +6,27 @@ import {
   parseLoadResponse,
   parseModelsResponse,
 } from "../src/lmstudio.ts";
-import { jsonResponse, kimiModel, modelsPayload } from "./fixtures.ts";
+import { jsonResponse, qwenModel, modelsPayload } from "./fixtures.ts";
 
 describe("LM Studio API", () => {
-  test("parses a runtime-provided Kimi 3 model without hardcoding its key", () => {
+  test("parses a synthetic Qwen3.6 catalog payload without production hardcoding", () => {
     const [model] = parseModelsResponse(modelsPayload());
-    expect(model?.displayName).toBe("Kimi 3");
-    expect(model?.key).toBe("catalog/runtime-kimi-3-q4");
-    expect(model?.quantization).toEqual({ name: "Q4_K_M", bitsPerWeight: 4.5 });
+    expect(model?.displayName).toBe("Qwen3.6 35B A3B");
+    expect(model?.key).toBe("qwen/qwen3.6-35b-a3b");
+    expect(model?.publisher).toBe("qwen");
+    expect(model?.architecture).toBe("qwen3_5_moe");
+    expect(model?.quantization).toEqual({ name: "6bit", bitsPerWeight: 6 });
+    expect(model?.sizeBytes).toBe(29_081_792_392);
+    expect(model?.paramsString).toBe("35B-A3B");
     expect(model?.maxContextLength).toBe(262_144);
+    expect(model?.format).toBe("mlx");
+    expect(model?.selectedVariant).toBe("lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit");
+    expect(model?.capabilities?.vision).toBe(true);
     expect(model?.capabilities?.trainedForToolUse).toBe(true);
+    expect(model?.capabilities?.reasoning).toEqual({
+      allowedOptions: ["off", "on"],
+      default: "on",
+    });
   });
 
   test("rejects malformed model payloads", () => {
@@ -31,7 +42,7 @@ describe("LM Studio API", () => {
       requests.push({ url: String(input), init });
       return jsonResponse({
         type: "llm",
-        instance_id: "loaded-kimi",
+        instance_id: "loaded-qwen",
         load_time_seconds: 2.5,
         status: "loaded",
         load_config: { context_length: 65_536 },
@@ -42,9 +53,9 @@ describe("LM Studio API", () => {
       token: "ephemeral",
     });
 
-    expect(await client.loadModel(kimiModel(), 65_536)).toEqual({
+    expect(await client.loadModel(qwenModel(), 65_536)).toEqual({
       type: "llm",
-      instanceId: "loaded-kimi",
+      instanceId: "loaded-qwen",
       loadTimeSeconds: 2.5,
       contextLength: 65_536,
     });
@@ -53,7 +64,7 @@ describe("LM Studio API", () => {
     const headers = new Headers(request?.init?.headers);
     expect(headers.get("Authorization")).toBe("Bearer ephemeral");
     expect(JSON.parse(String(request?.init?.body))).toEqual({
-      model: "catalog/runtime-kimi-3-q4",
+      model: "qwen/qwen3.6-35b-a3b",
       context_length: 65_536,
       echo_load_config: true,
     });
@@ -68,7 +79,7 @@ describe("LM Studio API", () => {
       },
     });
     await expect(
-      client.loadModel(kimiModel({ maxContextLength: 32_768 }), 65_536),
+      client.loadModel(qwenModel({ maxContextLength: 32_768 }), 65_536),
     ).rejects.toMatchObject({ kind: "unsupported-context" });
     expect(called).toBe(false);
   });
@@ -78,7 +89,7 @@ describe("LM Studio API", () => {
       parseLoadResponse(
         {
           type: "llm",
-          instance_id: "kimi",
+          instance_id: "qwen",
           load_time_seconds: 1,
           status: "loaded",
           load_config: { context_length: 8_192 },

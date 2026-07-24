@@ -5,7 +5,7 @@ describe("Codex process construction", () => {
   test("uses process-scoped provider overrides and preserves cwd/model", () => {
     const spec = buildCodexProcess({
       codexPath: "/usr/local/bin/codex",
-      modelId: "runtime/kimi-3-instance",
+      modelId: "qwen/qwen3.6-35b-a3b",
       endpoint: "http://127.0.0.1:1234",
       contextLength: 65_536,
       cwd: "/work/project with spaces",
@@ -15,7 +15,7 @@ describe("Codex process construction", () => {
     expect(spec.command.slice(0, 5)).toEqual([
       "/usr/local/bin/codex",
       "--model",
-      "runtime/kimi-3-instance",
+      "qwen/qwen3.6-35b-a3b",
       "--cd",
       "/work/project with spaces",
     ]);
