@@ -43,7 +43,44 @@ LM Studio introduced its native v1 management API in 0.4.0. Version 0.4.15 is
 recommended because its
   [release notes](https://lmstudio.ai/changelog/lmstudio-v0.4.15) include a fix
 for a Codex tool-type error. Standalone LocalHub binaries do not require Bun;
-building from source requires Bun 1.3.14 or newer.
+the source installers require `bun`/`bunx` and invoke pinned Bun 1.3.14.
+
+## Quick Start
+
+From a checked-out LocalHub repository, install with one command.
+
+macOS arm64:
+
+```sh
+./scripts/install.sh
+```
+
+This builds, ad hoc signs, smoke-tests, and installs
+`~/.local/bin/lh`. If that directory is not already on `PATH`, the installer
+prints the exact directory to add.
+
+Windows x64, from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+This builds, smoke-tests, and installs
+`%LOCALAPPDATA%\Programs\LocalHub\lh.exe`, then adds that directory to the
+per-user `PATH` when needed. Open a new terminal if `lh` is not found
+immediately.
+
+Then prepare LM Studio:
+
+1. Update LM Studio, install a tool-capable LLM whose maximum context is at
+   least 65,536, and start the Developer server.
+2. On Windows, complete either the optional LM Link setup or the authenticated
+   direct-LAN setup below.
+3. Run `lh doctor` and resolve any `FAIL`.
+4. Change to the project you want Codex to work on and run `lh`.
+
+The source installers only build and copy LocalHub. They do not install or
+update Bun, LM Studio, Codex, models, links, or firewall rules.
 
 ## LM Studio preparation
 

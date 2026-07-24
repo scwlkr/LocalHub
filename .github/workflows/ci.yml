@@ -57,3 +57,25 @@ jobs:
 
       - name: Smoke test standalone executable
         run: ${{ matrix.executable }} --help
+
+      - name: Test Windows source installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP "localhub-install"
+          & ./scripts/install.ps1 -InstallDir $installDir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $installDir "lh.exe") --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $installDir "lh.exe") --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Test macOS source installer
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          LOCALHUB_INSTALL_DIR: ${{ runner.temp }}/localhub-install
+        run: |
+          ./scripts/install.sh
+          "$LOCALHUB_INSTALL_DIR/lh" --version
+          "$LOCALHUB_INSTALL_DIR/lh" --help
