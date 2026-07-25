@@ -9,7 +9,7 @@ import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
 import type { LocalHubConfig } from "./types.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 const HELP = `LocalHub ${VERSION}
 

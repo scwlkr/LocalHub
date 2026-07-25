@@ -314,10 +314,10 @@ export function parseLoadResponse(value: unknown, expectedContext: number): Load
     isObject(value.load_config) && typeof value.load_config.context_length === "number"
       ? value.load_config.context_length
       : null;
-  if (context !== expectedContext) {
+  if (context === null || context < expectedContext) {
     throw new LmStudioError(
       "unsupported-context",
-      `LM Studio loaded ${context ?? "an unknown context"} instead of ${expectedContext}.`,
+      `LM Studio loaded ${context ?? "an unknown context"}, below the requested minimum ${expectedContext}.`,
     );
   }
   return {

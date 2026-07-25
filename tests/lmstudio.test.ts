@@ -84,7 +84,19 @@ describe("LM Studio API", () => {
     expect(called).toBe(false);
   });
 
-  test("requires LM Studio to echo the requested context", () => {
+  test("accepts an expanded context and rejects one below the requested minimum", () => {
+    expect(
+      parseLoadResponse(
+        {
+          type: "llm",
+          instance_id: "qwen",
+          load_time_seconds: 1,
+          status: "loaded",
+          load_config: { context_length: 258_816 },
+        },
+        65_536,
+      ),
+    ).toMatchObject({ contextLength: 258_816 });
     expect(() =>
       parseLoadResponse(
         {
@@ -96,7 +108,7 @@ describe("LM Studio API", () => {
         },
         65_536,
       ),
-    ).toThrow("loaded 8192 instead of 65536");
+    ).toThrow("below the requested minimum 65536");
   });
 
   test("unloads by instance id", async () => {

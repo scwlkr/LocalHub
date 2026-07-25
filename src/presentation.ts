@@ -95,7 +95,10 @@ export function renderModelDetails(model: ModelInfo | null): string {
   }
   const loaded = model.loadedInstances.length
     ? model.loadedInstances
-        .map((instance) => `${instance.id} @ ${formatNumber(instance.contextLength)}`)
+        .map(
+          (instance) =>
+            `${instance.id} @ ${formatNumber(instance.contextLength)}${instance.parallel ? ` · parallel ${instance.parallel}` : ""}`,
+        )
         .join(", ")
     : "not loaded";
   const capability = model.capabilities;
@@ -141,7 +144,10 @@ export function modelOption(model: ModelInfo): {
 function modelStatusLines(model: ModelInfo): string[] {
   const loaded = model.loadedInstances.length
     ? model.loadedInstances
-        .map((instance) => `${instance.id}@${formatNumber(instance.contextLength)}`)
+        .map(
+          (instance) =>
+            `${instance.id}@${formatNumber(instance.contextLength)}${instance.parallel ? `/p${instance.parallel}` : ""}`,
+        )
         .join(", ")
     : "no";
   return [

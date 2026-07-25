@@ -4,8 +4,8 @@ LocalHub is a tiny open-source terminal UI, installed as `lh`, that connects
 Codex to an LM Studio model without changing your normal Codex setup.
 
 Run it from a project directory to inspect the machine, route, server, Codex,
-memory, and installed models; select an LLM; load it at an exact context; then
-hand the terminal to Codex in that same directory. Inference can stay on a
+memory, and installed models; select an LLM; load it with the requested minimum
+context; then hand the terminal to Codex in that same directory. Inference can stay on a
 64 GB Apple-silicon Mac while Codex and its tools run on either the Mac or a
 Windows workstation.
 
@@ -17,9 +17,11 @@ Windows workstation.
   context, format, and advertised vision, reasoning, and tool-use
   capabilities.
 - Defaults to a 65,536-token context.
-- Reuses an instance already loaded at that exact context. Otherwise it
+- Reuses an instance already loaded with at least that context. Otherwise it
   unloads the selected model's existing instances, loads it with
-  `echo_load_config`, and verifies LM Studio applied the requested context.
+  `echo_load_config`, and verifies LM Studio provides at least the requested
+  context. If the runtime expands the context, LocalHub reports the actual
+  value while keeping Codex's context budget at the configured value.
 - Tears down the alternate screen before starting Codex with inherited
   standard input/output/error. LocalHub returns Codex's exit code when Codex
   exits.
@@ -82,25 +84,26 @@ integration-test target, not a hardcoded LocalHub dependency:
 ```sh
 lms get "https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit" --mlx --yes
 lms load --estimate-only qwen3.6-35b-a3b-mlx --gpu max --context-length 65536
+lms load qwen3.6-35b-a3b-mlx --gpu max --context-length 65536 --parallel 1 \
+  --identifier qwen/qwen3.6-35b-a3b --yes
 lms server start --port 1234
 lh doctor
 lh
 ```
 
 In `lh`, highlight `Qwen3.6 35B A3B`, confirm the selected variant is the
-requested 6-bit MLX artifact, and press `l` to load at 65,536 tokens.
+requested 6-bit MLX artifact, and press `l` to provide at least 65,536 tokens.
 `Enter`/`c` loads when needed and launches Codex. The official LM Studio
 recipe enables thinking and disables preserve-thinking by default; LocalHub
 does not inject model-specific overrides.
 
-> **Current MLX blocker (verified July 24, 2026):** LM Studio 0.4.20 with
-> MLX runtime 1.10.1 accepts the 65,536 request for this model but auto-fits
-> the loaded runtime to a different context. LocalHub fails closed on that
-> mismatch. This behavior is covered by
+> **Current MLX behavior (verified July 25, 2026):** LM Studio 0.4.20 with
+> MLX runtime 1.10.1 accepts the 65,536 request but auto-fits this model to
+> 258,816 tokens. LocalHub accepts the larger runtime, displays both values,
+> and still tells Codex to budget for 65,536. This behavior is tracked by
 > [LM Studio bug #2191](https://github.com/lmstudio-ai/lmstudio-bug-tracker/issues/2191).
-> The live Responses, Codex tool-loop, and Windows serving checks remain
-> blocked until LM Studio supplies a supported way to honor the exact
-> context.
+> `/v1/responses`, stateful repeated function calls, and a real Codex
+> read/create/edit/test loop pass with the expanded runtime.
 
 ### Windows path
 
@@ -292,19 +295,20 @@ The recommended first-run model is
 using exactly
 [`lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit`](https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-MLX-6bit).
 The upstream base model has 35 billion total parameters, activates 3 billion
-per token, and supports 262,144 tokens. The requested LocalHub runtime uses
-65,536 tokens, thinking on, preserve-thinking off, and the Apple-silicon MLX
-runtime. Qwen recommends at least 128K context for maximum thinking headroom;
-65,536 remains within the model's supported context and is the intentional
-LocalHub validation setting.
+per token, and supports 262,144 tokens. LocalHub requests a minimum of 65,536
+tokens, keeps that as Codex's process budget, uses thinking on and
+preserve-thinking off, and relies on the Apple-silicon MLX runtime. Qwen
+recommends at least 128K context for maximum thinking headroom; LM Studio
+currently expands this request to 258,816.
 
-The synthetic test fixture mirrors the exact target's catalog metadata and verifies
-native v1 parsing, MLX/6-bit presentation, reasoning defaults, exact
-65,536-token loading, state transitions, routing, TUI rendering, and Codex
-process construction. It does not make production model selection special.
+The synthetic test fixture mirrors the exact target's catalog metadata and
+verifies native v1 parsing, MLX/6-bit presentation, reasoning defaults,
+minimum 65,536-token loading, expanded-runtime handling, state transitions,
+routing, TUI rendering, and Codex process construction. It does not make
+production model selection special.
 
-Live Responses and Codex tool-loop checks remain integration tests because
-mocked unit tests cannot prove inference quality. LocalHub always uses model
+Live Responses and Codex tool-loop checks remain manual integration tests
+because mocked unit tests cannot prove inference quality. LocalHub always uses model
 keys, loaded instance IDs, variants, and capabilities returned by LM Studio,
 so another compatible installed LLM follows the same path without a code
 change.
@@ -334,6 +338,9 @@ Run `lh doctor` after each setup change.
 - Direct-LAN HTTP is authenticated but unencrypted.
 - Capability metadata is descriptive, not a guarantee of correct Codex tool
   calls.
+- LM Studio's MLX runtime may expand a requested context. LocalHub accepts a
+  larger value, reports it, and rejects only a runtime below the configured
+  minimum.
 - LocalHub does not manage model downloads, LM Studio runtimes, server
   security settings, Mac firewall rules, or Codex installation. `lh setup`
   only runs explicit Windows LM Studio link/server commands after prompting.

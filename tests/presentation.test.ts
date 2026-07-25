@@ -12,7 +12,7 @@ const model: ModelInfo = {
   quantization: { name: "6bit", bitsPerWeight: 6 },
   sizeBytes: 29_100_000_000,
   paramsString: "35B-A3B",
-  loadedInstances: [{ id: "example/model", contextLength: 65_536 }],
+  loadedInstances: [{ id: "example/model", contextLength: 258_816, parallel: 1 }],
   maxContextLength: 262_144,
   format: "mlx",
   capabilities: {
@@ -51,6 +51,7 @@ describe("model presentation", () => {
     const details = renderModelDetails(model);
 
     expect(details).toContain("Variant: example/model@6bit");
+    expect(details).toContain("example/model @ 258,816 · parallel 1");
     expect(details).toContain("reasoning off/on (default on)");
   });
 
@@ -67,6 +68,7 @@ describe("model presentation", () => {
     );
 
     expect(status).toContain("variant=example/model@6bit · format=mlx");
+    expect(status).toContain("loaded=example/model@258,816/p1");
     expect(status).toContain("reasoning=off/on (default on)");
   });
 });

@@ -55,13 +55,14 @@ export async function collectRuntime(
 
 export interface LoadOutcome {
   instanceId: string;
+  contextLength: number;
   models: ModelInfo[];
   reloaded: boolean;
 }
 
 export interface EnsureModelLoadedOptions {
   pollIntervalMs?: number;
-  exactContextStabilityMs?: number;
+  sufficientContextStabilityMs?: number;
 }
 
 interface ModelClient {
@@ -87,20 +88,25 @@ export async function ensureModelLoaded(
       `${model.displayName} supports ${model.maxContextLength} tokens, not ${contextLength}.`,
     );
   }
-  const ready = model.loadedInstances.find((instance) => instance.contextLength === contextLength);
+  const ready = model.loadedInstances.find((instance) => instance.contextLength >= contextLength);
   if (ready) {
     const models = await client.listModels(signal);
     const verified = models
       .find((candidate) => candidate.key === model.key)
       ?.loadedInstances.find(
-        (instance) => instance.id === ready.id && instance.contextLength === contextLength,
+        (instance) => instance.id === ready.id && instance.contextLength >= contextLength,
       );
     if (verified) {
-      return { instanceId: verified.id, models, reloaded: false };
+      return {
+        instanceId: verified.id,
+        contextLength: verified.contextLength,
+        models,
+        reloaded: false,
+      };
     }
     throw new LmStudioError(
       "invalid-response",
-      `LM Studio no longer reports ${ready.id} at ${contextLength} tokens; refresh and retry.`,
+      `LM Studio no longer reports ${ready.id} with at least ${contextLength} tokens; refresh and retry.`,
     );
   }
 
@@ -139,7 +145,7 @@ export async function ensureModelLoaded(
     model.key,
     contextLength,
     pollIntervalMs,
-    Math.max(0, options.exactContextStabilityMs ?? 60_000),
+    Math.max(0, options.sufficientContextStabilityMs ?? 60_000),
     operation.signal,
   ).then(
     (observation) => ({ kind: "observed", observation }),
@@ -158,9 +164,7 @@ export async function ensureModelLoaded(
     if (winner.error instanceof LmStudioError && winner.error.kind === "unsupported-context") {
       const models = await client.listModels(signal).catch(() => []);
       const loadedModel = models.find((candidate) => candidate.key === model.key);
-      if (
-        loadedModel?.loadedInstances.some((instance) => instance.contextLength !== contextLength)
-      ) {
+      if (loadedModel?.loadedInstances.some((instance) => instance.contextLength < contextLength)) {
         const unloaded = await unloadUnexpectedInstances(
           client,
           loadedModel,
@@ -192,7 +196,7 @@ export async function ensureModelLoaded(
       .find((candidate) => candidate.key === model.key)
       ?.loadedInstances.find(
         (instance) =>
-          instance.id === observation.instanceId && instance.contextLength === contextLength,
+          instance.id === observation.instanceId && instance.contextLength >= contextLength,
       );
     if (!verified) {
       throw new LmStudioError(
@@ -202,6 +206,7 @@ export async function ensureModelLoaded(
     }
     return {
       instanceId: verified.id,
+      contextLength: verified.contextLength,
       models,
       reloaded: model.loadedInstances.length > 0,
     };
@@ -211,15 +216,20 @@ export async function ensureModelLoaded(
   const models = await client.listModels(signal);
   const refreshed = models.find((candidate) => candidate.key === model.key);
   const verified = refreshed?.loadedInstances.find(
-    (instance) => instance.id === loaded.instanceId && instance.contextLength === contextLength,
+    (instance) => instance.id === loaded.instanceId && instance.contextLength >= contextLength,
   );
   if (!verified) {
     throw new LmStudioError(
       "invalid-response",
-      `LM Studio did not confirm ${loaded.instanceId} at ${contextLength} tokens.`,
+      `LM Studio did not confirm ${loaded.instanceId} with at least ${contextLength} tokens.`,
     );
   }
-  return { instanceId: verified.id, models, reloaded: model.loadedInstances.length > 0 };
+  return {
+    instanceId: verified.id,
+    contextLength: verified.contextLength,
+    models,
+    reloaded: model.loadedInstances.length > 0,
+  };
 }
 
 type LoadRaceResult =
@@ -230,44 +240,44 @@ type LoadRaceResult =
 
 type LoadObservation =
   | { kind: "mismatch"; model: ModelInfo }
-  | { kind: "exact"; instanceId: string };
+  | { kind: "sufficient"; instanceId: string };
 
 async function observeLoadedModel(
   client: ModelClient,
   modelKey: string,
   contextLength: number,
   intervalMs: number,
-  exactContextStabilityMs: number,
+  sufficientContextStabilityMs: number,
   signal: AbortSignal,
 ): Promise<LoadObservation> {
-  let exactCandidateId: string | null = null;
-  let exactFirstSeenAt = 0;
+  let sufficientCandidateId: string | null = null;
+  let sufficientFirstSeenAt = 0;
   while (true) {
     await abortableDelay(intervalMs, signal);
     try {
       const models = await client.listModels(signal);
       const model = models.find((candidate) => candidate.key === modelKey);
-      const exact = model?.loadedInstances.find(
-        (instance) => instance.contextLength === contextLength,
+      const sufficient = model?.loadedInstances.find(
+        (instance) => instance.contextLength >= contextLength,
       );
       const hasMismatch = model?.loadedInstances.some(
-        (instance) => instance.contextLength !== contextLength,
+        (instance) => instance.contextLength < contextLength,
       );
       if (model && hasMismatch) {
         return { kind: "mismatch", model };
       }
-      if (!exact) {
-        exactCandidateId = null;
+      if (!sufficient) {
+        sufficientCandidateId = null;
         continue;
       }
       const now = Date.now();
-      if (exactCandidateId === exact.id) {
-        if (now - exactFirstSeenAt >= exactContextStabilityMs) {
-          return { kind: "exact", instanceId: exact.id };
+      if (sufficientCandidateId === sufficient.id) {
+        if (now - sufficientFirstSeenAt >= sufficientContextStabilityMs) {
+          return { kind: "sufficient", instanceId: sufficient.id };
         }
       } else {
-        exactCandidateId = exact.id;
-        exactFirstSeenAt = now;
+        sufficientCandidateId = sufficient.id;
+        sufficientFirstSeenAt = now;
       }
     } catch (error) {
       if (signal.aborted) {
@@ -284,7 +294,7 @@ async function unloadUnexpectedInstances(
   signal?: AbortSignal,
 ): Promise<boolean> {
   for (const instance of model.loadedInstances.filter(
-    (candidate) => candidate.contextLength !== contextLength,
+    (candidate) => candidate.contextLength < contextLength,
   )) {
     try {
       await client.unloadInstance(instance.id, signal);
@@ -296,7 +306,7 @@ async function unloadUnexpectedInstances(
     const models = await client.listModels(signal);
     return !models
       .find((candidate) => candidate.key === model.key)
-      ?.loadedInstances.some((instance) => instance.contextLength !== contextLength);
+      ?.loadedInstances.some((instance) => instance.contextLength < contextLength);
   } catch {
     return false;
   }
@@ -311,7 +321,7 @@ function contextMismatchError(
   const contexts = [
     ...new Set(
       loadedModel.loadedInstances
-        .filter((instance) => instance.contextLength !== contextLength)
+        .filter((instance) => instance.contextLength < contextLength)
         .map((instance) => instance.contextLength.toLocaleString("en-US")),
     ),
   ].join(", ");
@@ -320,7 +330,7 @@ function contextMismatchError(
     : "Unload the mismatched instance before retrying.";
   return new LmStudioError(
     "unsupported-context",
-    `LM Studio loaded ${requestedModel.displayName} at ${contexts} instead of ${contextLength.toLocaleString("en-US")} tokens. ${cleanup} Fix: update LM Studio or its model runtime, then retry.`,
+    `LM Studio loaded ${requestedModel.displayName} at only ${contexts}; LocalHub needs at least ${contextLength.toLocaleString("en-US")} tokens. ${cleanup} Fix: lower contextLength or update LM Studio, then retry.`,
   );
 }
 

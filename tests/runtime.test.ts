@@ -4,9 +4,9 @@ import { ensureModelLoaded, unloadModel } from "../src/runtime.ts";
 import { qwenModel } from "./fixtures.ts";
 
 describe("model state operations", () => {
-  test("reuses an instance already loaded at the requested context", async () => {
+  test("reuses an instance that provides at least the requested context", async () => {
     const model = qwenModel({
-      loadedInstances: [{ id: "ready", contextLength: 65_536 }],
+      loadedInstances: [{ id: "ready", contextLength: 258_816 }],
     });
     const calls: string[] = [];
     const result = await ensureModelLoaded(
@@ -28,11 +28,12 @@ describe("model state operations", () => {
       65_536,
     );
     expect(result.instanceId).toBe("ready");
+    expect(result.contextLength).toBe(258_816);
     expect(result.reloaded).toBe(false);
     expect(calls).toEqual(["list"]);
   });
 
-  test("reloads the selected model and verifies the exact context", async () => {
+  test("reloads the selected model and verifies the requested context", async () => {
     const original = qwenModel({
       loadedInstances: [{ id: "old", contextLength: 8_192 }],
     });
@@ -62,18 +63,19 @@ describe("model state operations", () => {
     );
     expect(result).toEqual({
       instanceId: "new",
+      contextLength: 65_536,
       models: [refreshed],
       reloaded: true,
     });
     expect(calls).toEqual(["unload:old", "list", "load:65536", "list"]);
   });
 
-  test("stops a hung load when runtime inventory reports a mismatched context", async () => {
+  test("stops a hung load when runtime inventory reports insufficient context", async () => {
     const calls: string[] = [];
     let loadAborted = false;
     let listCalls = 0;
     const wrongContext = qwenModel({
-      loadedInstances: [{ id: "wrong-context", contextLength: 258_816 }],
+      loadedInstances: [{ id: "wrong-context", contextLength: 32_768 }],
     });
 
     await expect(
@@ -106,56 +108,44 @@ describe("model state operations", () => {
       ),
     ).rejects.toMatchObject({
       kind: "unsupported-context",
-      message: expect.stringContaining("258,816 instead of 65,536"),
+      message: expect.stringContaining("only 32,768"),
     });
     expect(loadAborted).toBe(true);
     expect(calls).toEqual(["unload:wrong-context"]);
   });
 
-  test("does not trust a provisional exact context while the load response hangs", async () => {
-    let listCalls = 0;
+  test("accepts a stable expanded context while the load response hangs", async () => {
     let loadAborted = false;
-    const provisional = qwenModel({
-      loadedInstances: [{ id: "provisional", contextLength: 65_536 }],
-    });
-    const wrongContext = qwenModel({
+    const expanded = qwenModel({
       loadedInstances: [{ id: "auto-fitted", contextLength: 258_816 }],
     });
 
-    await expect(
-      ensureModelLoaded(
-        {
-          unloadInstance: async (id) => id,
-          loadModel: async (_model, _context, signal) =>
-            await new Promise<{ instanceId: string }>((_resolve, reject) => {
-              signal?.addEventListener(
-                "abort",
-                () => {
-                  loadAborted = true;
-                  reject(new Error("cancelled"));
-                },
-                { once: true },
-              );
-            }),
-          listModels: async () => {
-            listCalls += 1;
-            if (listCalls === 1) {
-              return [provisional];
-            }
-            if (listCalls === 2) {
-              return [wrongContext];
-            }
-            return [qwenModel()];
-          },
-        },
-        qwenModel(),
-        65_536,
-        undefined,
-        { pollIntervalMs: 0 },
-      ),
-    ).rejects.toMatchObject({
-      kind: "unsupported-context",
-      message: expect.stringContaining("258,816 instead of 65,536"),
+    const result = await ensureModelLoaded(
+      {
+        unloadInstance: async (id) => id,
+        loadModel: async (_model, _context, signal) =>
+          await new Promise<{ instanceId: string }>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                loadAborted = true;
+                reject(new Error("cancelled"));
+              },
+              { once: true },
+            );
+          }),
+        listModels: async () => [expanded],
+      },
+      qwenModel(),
+      65_536,
+      undefined,
+      { pollIntervalMs: 0, sufficientContextStabilityMs: 0 },
+    );
+    expect(result).toEqual({
+      instanceId: "auto-fitted",
+      contextLength: 258_816,
+      models: [expanded],
+      reloaded: false,
     });
     expect(loadAborted).toBe(true);
   });
@@ -185,11 +175,12 @@ describe("model state operations", () => {
       qwenModel(),
       65_536,
       undefined,
-      { pollIntervalMs: 0, exactContextStabilityMs: 0 },
+      { pollIntervalMs: 0, sufficientContextStabilityMs: 0 },
     );
 
     expect(result).toEqual({
       instanceId: "stable-exact",
+      contextLength: 65_536,
       models: [exact],
       reloaded: false,
     });
@@ -200,7 +191,7 @@ describe("model state operations", () => {
     const unloaded: string[] = [];
     let listCalls = 0;
     const wrongContext = qwenModel({
-      loadedInstances: [{ id: "echoed-wrong-context", contextLength: 258_816 }],
+      loadedInstances: [{ id: "echoed-wrong-context", contextLength: 32_768 }],
     });
 
     await expect(
@@ -211,10 +202,7 @@ describe("model state operations", () => {
             return id;
           },
           loadModel: async () => {
-            throw new LmStudioError(
-              "unsupported-context",
-              "LM Studio loaded 258816 instead of 65536.",
-            );
+            throw new LmStudioError("unsupported-context", "LM Studio loaded 32768 below 65536.");
           },
           listModels: async () => {
             listCalls += 1;
@@ -231,13 +219,13 @@ describe("model state operations", () => {
     expect(unloaded).toEqual(["echoed-wrong-context"]);
   });
 
-  test("mismatch cleanup preserves an exact-context instance", async () => {
+  test("mismatch cleanup preserves a sufficient-context instance", async () => {
     const unloaded: string[] = [];
     let listCalls = 0;
     const mixed = qwenModel({
       loadedInstances: [
         { id: "keep-exact", contextLength: 65_536 },
-        { id: "remove-wrong", contextLength: 258_816 },
+        { id: "remove-wrong", contextLength: 32_768 },
       ],
     });
     const exactOnly = qwenModel({

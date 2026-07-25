@@ -192,11 +192,19 @@ export function updateTuiLayout(
   const diagnosticConfig = state.selectedModel
     ? { ...config, selectedModel: state.selectedModel }
     : config;
+  const showError = state.phase === "error" && !showDiagnostics;
   layout.details.content =
     showDiagnostics && state.snapshot
       ? renderTuiDiagnostics(state.snapshot, diagnosticConfig)
-      : renderModelDetails(selected);
-  layout.detailsBox.title = showDiagnostics ? " Diagnostics " : " Selection ";
+      : showError
+        ? `ERROR: ${state.message}\n\nRetry: l load · r refresh · d diagnostics · q quit`
+        : renderModelDetails(selected);
+  layout.detailsBox.title = showDiagnostics
+    ? " Diagnostics "
+    : showError
+      ? " Error "
+      : " Selection ";
+  layout.detailsBox.borderColor = showError ? "#ef4444" : "#475569";
   layout.detailsBox.verticalScrollBar.visible = showDiagnostics;
   layout.detailsBox.scrollTo(0);
   if (showDiagnostics) {
@@ -205,8 +213,10 @@ export function updateTuiLayout(
     layout.models.focus();
   }
   const busy = state.phase === "busy" ? " [busy · q cancels]" : "";
+  const message = state.phase === "error" ? `ERROR: ${state.message}` : state.message;
+  layout.footer.fg = state.phase === "error" ? "#f87171" : "#94a3b8";
   layout.footer.content = [
-    `${state.message}${busy}`,
+    `${message}${busy}`,
     showDiagnostics
       ? "↑↓/jk scroll · d close · l load · u unload · r refresh · q quit"
       : "↑↓/jk · Enter/c launch · l load · u unload · r refresh · d diag · q quit",
@@ -321,7 +331,10 @@ export async function runTui(
       dispatch({
         type: "models-updated",
         snapshot: runtime.snapshot,
-        message: `${outcome.reloaded ? "Reloaded" : "Loaded"} ${model.displayName} at ${config.contextLength.toLocaleString("en-US")} tokens.${persistenceWarning}`,
+        message:
+          outcome.contextLength === config.contextLength
+            ? `${outcome.reloaded ? "Reloaded" : "Loaded"} ${model.displayName} at ${config.contextLength.toLocaleString("en-US")} tokens.${persistenceWarning}`
+            : `${outcome.reloaded ? "Reloaded" : "Loaded"} ${model.displayName} with ${outcome.contextLength.toLocaleString("en-US")} tokens; requested minimum ${config.contextLength.toLocaleString("en-US")}.${persistenceWarning}`,
       });
       return outcome.instanceId;
     } catch (error) {

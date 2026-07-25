@@ -139,16 +139,18 @@ export function diagnose(snapshot: RuntimeSnapshot, config: LocalHubConfig): Che
   if (selected) {
     checks.push(toolCompatibilityCheck(selected));
     if (selected.maxContextLength >= config.contextLength) {
-      const exact = selected.loadedInstances.some(
-        (instance) => instance.contextLength === config.contextLength,
+      const loaded = selected.loadedInstances.find(
+        (instance) => instance.contextLength >= config.contextLength,
       );
       checks.push({
         name: "Selected load",
-        level: exact ? "pass" : "warn",
-        detail: exact
-          ? `${selected.displayName} is loaded at ${formatNumber(config.contextLength)} tokens.`
-          : `${selected.displayName} is not loaded at ${formatNumber(config.contextLength)} tokens.`,
-        ...(exact ? {} : { fix: "Press l in the TUI; launch also loads/reloads automatically." }),
+        level: loaded ? "pass" : "warn",
+        detail: loaded
+          ? loaded.contextLength === config.contextLength
+            ? `${selected.displayName} is loaded at ${formatNumber(config.contextLength)} tokens.`
+            : `${selected.displayName} provides ${formatNumber(loaded.contextLength)} tokens; LocalHub requested at least ${formatNumber(config.contextLength)}.`
+          : `${selected.displayName} is not loaded with at least ${formatNumber(config.contextLength)} tokens.`,
+        ...(loaded ? {} : { fix: "Press l in the TUI; launch also loads/reloads automatically." }),
       });
     }
   }

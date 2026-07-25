@@ -82,6 +82,22 @@ describe("diagnostics", () => {
     expect(checks.find((check) => check.name === "Selected load")).toBeUndefined();
   });
 
+  test("accepts and reports a runtime context expanded above the requested minimum", () => {
+    const expanded = qwenModel({
+      loadedInstances: [{ id: "expanded", contextLength: 258_816, parallel: 1 }],
+    });
+    const selectedLoad = diagnose(onlineSnapshot([expanded]), defaultConfig()).find(
+      (check) => check.name === "Selected load",
+    );
+
+    expect(selectedLoad).toEqual(
+      expect.objectContaining({
+        level: "pass",
+        detail: expect.stringContaining("provides 258,816 tokens"),
+      }),
+    );
+  });
+
   test("surfaces a failed direct-LAN fallback behind a reachable local endpoint", () => {
     const snapshot = onlineSnapshot([]);
     snapshot.system.platform = "win32";

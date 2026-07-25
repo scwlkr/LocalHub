@@ -122,7 +122,7 @@ test("diagnostics use the highlighted model and can scroll to every check", asyn
     const frame = captureCharFrame();
 
     expect(frame).toContain("Highlighted model is not trained for tool use");
-    expect(frame).toContain("Highlighted model is not loaded at 65,536 tokens");
+    expect(frame).toContain("Highlighted model is not loaded with at least 65,536 tokens");
     expect(frame).toContain("Memory: 64 GiB total");
   } finally {
     renderer.destroy();
@@ -227,6 +227,35 @@ test("Enter visibly starts loading in an 80-by-20 terminal", async () => {
   }
 });
 
+test("load failures render a persistent visible error panel", async () => {
+  const { renderer, renderOnce, captureCharFrame } = await createTestRenderer({
+    width: 80,
+    height: 20,
+  });
+  try {
+    const layout = createTuiLayout(renderer);
+    const ready = reduceTuiState(initialTuiState(), {
+      type: "refresh-succeeded",
+      snapshot: runtimeSnapshot([qwenModel()]),
+    });
+    const failed = reduceTuiState(ready, {
+      type: "failed",
+      message: "LM Studio could not load the selected model.",
+    });
+
+    updateTuiLayout(layout, failed, defaultConfig(), false);
+    await renderOnce();
+    const frame = captureCharFrame();
+
+    expect(frame).toContain("Error");
+    expect(frame).toContain("ERROR");
+    expect(frame).toContain("LM Studio could not load the selected model");
+    expect(frame).toContain("Retry: l load");
+  } finally {
+    renderer.destroy();
+  }
+});
+
 test("launch continues when saving the model preference fails", async () => {
   const { renderer } = await createTestRenderer({ width: 90, height: 24 });
   let markReady: (() => void) | undefined;
@@ -246,6 +275,7 @@ test("launch continues when saving the model preference fails", async () => {
       },
       ensureLoaded: async () => ({
         instanceId: "loaded-instance",
+        contextLength: 65_536,
         models: [
           qwenModel({
             loadedInstances: [{ id: "loaded-instance", contextLength: 65_536 }],

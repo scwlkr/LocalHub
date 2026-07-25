@@ -21,6 +21,7 @@ describe("Codex process construction", () => {
     ]);
     expect(spec.command.join(" ")).toContain('model_provider="localhub_lmstudio"');
     expect(spec.command.join(" ")).toContain("model_context_window=65536");
+    expect(spec.command.join(" ")).toContain("model_supports_reasoning_summaries=false");
     expect(spec.command.join(" ")).toContain('base_url="http://127.0.0.1:1234/v1"');
     expect(spec.command.join(" ")).toContain('wire_api="responses"');
     expect(spec.cwd).toBe("/work/project with spaces");

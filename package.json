@@ -1,6 +1,6 @@
 {
   "name": "localhub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tiny TUI for running Codex against LM Studio models",
   "type": "module",
   "private": true,

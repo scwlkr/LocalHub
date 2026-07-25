@@ -56,6 +56,8 @@ export function buildCodexProcess(options: CodexProcessOptions): CodexProcessSpe
     "--config",
     `model_context_window=${options.contextLength}`,
     "--config",
+    "model_supports_reasoning_summaries=false",
+    "--config",
     'service_tier="default"',
     "--config",
     "features.fast_mode=false",
