@@ -32,8 +32,14 @@ _Avoid_: Public endpoint, internet gateway
 
 **Browser Chat**:
 The Local Gateway interface where a Member talks with a model and deliberately
-submits content. It is not a way to browse or control the Member's computer.
+submits content. Its history belongs to that browser; it is not a way to browse
+or control the Member's computer.
 _Avoid_: Remote desktop, local file browser
+
+**Attachment**:
+A photo or document deliberately submitted through Browser Chat and held by
+the Host only long enough to process it.
+_Avoid_: Host file, shared upload
 
 **Tool Runner**:
 A local program that performs computer and file actions on the same computer
