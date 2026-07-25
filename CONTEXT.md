@@ -51,6 +51,11 @@ A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
 _Avoid_: Fine-tune, training profile
 
+**Profile Test**:
+A trial that runs an exact Run Profile without silently changing it and reports
+whether it worked, how it performed, and what resources it used.
+_Avoid_: Auto-fit, recommended profile
+
 **Shared Model**:
 A model the Host has made visible to Members together with the choices and
 limits Members may use.
