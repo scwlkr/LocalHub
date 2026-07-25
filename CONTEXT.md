@@ -112,6 +112,11 @@ only when the Host explicitly stops it. Closing a terminal or browser does not
 end a LocalHub Run.
 _Avoid_: Terminal session, browser session
 
+**First Run Setup**:
+The one-time Host flow that checks the Host Computer, chooses model storage,
+starts LocalHub, and opens the dashboard after installation.
+_Avoid_: LocalHub Run, model setup
+
 **Model Training**:
 Changing a model itself using examples or datasets. Model Training is not part
 of LocalHub v1.
