@@ -56,6 +56,20 @@ A model the Host has made visible to Members together with the choices and
 limits Members may use.
 _Avoid_: Installed model, public model
 
+**Inference Request**:
+One submitted request for a model to produce a response.
+_Avoid_: Chat, model session
+
+**Request Queue**:
+The ordered waiting line for Inference Requests that the Host Computer cannot
+serve immediately. A waiting Member can see the request's status and position.
+_Avoid_: Loading screen, hidden backlog
+
+**Pinned Model**:
+A Shared Model the Host has protected from being unloaded or replaced by Member
+requests.
+_Avoid_: Default model, selected model
+
 **LocalHub Run**:
 The active period beginning when the Host explicitly starts LocalHub and ending
 only when the Host explicitly stops it. Closing a terminal or browser does not
