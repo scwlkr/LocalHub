@@ -25,6 +25,11 @@ A trusted person allowed to use LocalHub without managing the Host Computer or
 its models.
 _Avoid_: Local user, guest, tenant
 
+**Member Label**:
+A browser-chosen nickname that helps the Host recognize a Member's queued and
+active work. It is not an account, verified identity, or access check.
+_Avoid_: Username, login, device identity
+
 **Local Gateway**:
 The LAN-only entry point through which Members use LocalHub services exposed by
 the Host.
@@ -104,7 +109,8 @@ _Avoid_: Chat, model session
 
 **Request Queue**:
 The ordered waiting line for Inference Requests that the Host Computer cannot
-serve immediately. A waiting Member can see the request's status and position.
+serve immediately. A waiting Member can see the request's status and position;
+the Host can see its Member Label and cancel it.
 _Avoid_: Loading screen, hidden backlog
 
 **Pinned Model**:
