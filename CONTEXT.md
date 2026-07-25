@@ -57,6 +57,16 @@ A Browser Tool that finds and reads information from the public web without a
 paid or metered service.
 _Avoid_: Host network search, paid search API
 
+**Context Capacity**:
+The maximum amount of material a running model can consider for one response,
+set by the Host through its Run Profile.
+_Avoid_: Conversation Memory, chat history
+
+**Conversation Memory**:
+The amount of the current Browser Chat history a Member chooses to include in
+new requests, bounded by the model's Context Capacity.
+_Avoid_: Context Capacity, saved memory
+
 **Run Profile**:
 A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
