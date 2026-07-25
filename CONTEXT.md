@@ -35,6 +35,11 @@ The LAN-only entry point through which Members use LocalHub services exposed by
 the Host.
 _Avoid_: Public endpoint, internet gateway
 
+**Member Link**:
+The friendly LAN address and QR code a Host shares to open Browser Chat, with a
+direct Host Computer address as fallback.
+_Avoid_: Invite link, public URL
+
 **Browser Chat**:
 The Local Gateway interface where a Member talks with a model and deliberately
 submits content. Its history belongs to that browser; it is not a way to browse
