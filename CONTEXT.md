@@ -46,6 +46,17 @@ A local program that performs computer and file actions on the same computer
 and with the same operating-system permissions as the person who started it.
 _Avoid_: Host tool service, remote shell
 
+**Browser Tool**:
+A Host-approved capability available in Browser Chat that can use submitted
+chat content, Attachments, or the public web but cannot access Host files,
+shell commands, or private LAN devices.
+_Avoid_: Tool Runner, Host tool
+
+**Web Search**:
+A Browser Tool that finds and reads information from the public web without a
+paid or metered service.
+_Avoid_: Host network search, paid search API
+
 **Run Profile**:
 A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
