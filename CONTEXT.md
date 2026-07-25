@@ -56,6 +56,16 @@ A model the Host has made visible to Members together with the choices and
 limits Members may use.
 _Avoid_: Installed model, public model
 
+**Installed Model**:
+A model available from storage controlled by the Host, whether or not it has
+been made available to Members.
+_Avoid_: Shared Model, loaded model
+
+**Model Variant**:
+A particular downloadable form of a model with a specific size and quality
+tradeoff, chosen before the model is run.
+_Avoid_: Run Profile, runtime setting
+
 **Inference Request**:
 One submitted request for a model to produce a response.
 _Avoid_: Chat, model session
