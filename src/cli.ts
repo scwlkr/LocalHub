@@ -47,6 +47,8 @@ export interface CliDependencies {
   readSecret?: typeof readHiddenInput;
   runSetupWizard?: typeof runSetup;
   save?: typeof saveConfig;
+  terminalColumns?: number;
+  terminalRows?: number;
 }
 
 export async function main(
@@ -146,6 +148,18 @@ export async function main(
   }
   if (!interactive) {
     console.error("The LocalHub TUI needs an interactive terminal. Run `lh status` instead.");
+    return 2;
+  }
+  const terminalColumns = dependencies.terminalColumns ?? process.stdout.columns;
+  const terminalRows = dependencies.terminalRows ?? process.stdout.rows;
+  if (
+    (terminalColumns !== undefined && terminalColumns < 80) ||
+    (terminalRows !== undefined && terminalRows < 18)
+  ) {
+    console.error(
+      `Terminal too small (${terminalColumns ?? "unknown"}x${terminalRows ?? "unknown"}). LocalHub needs at least 80x18.`,
+    );
+    console.error("Fix: enlarge the terminal and rerun `lh`; use `lh status` meanwhile.");
     return 2;
   }
 

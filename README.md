@@ -36,6 +36,7 @@ telemetry, database, web UI, or hosted-provider manager.
 ## Requirements
 
 - macOS arm64 or Windows x64
+- Interactive terminal at least 80 columns by 18 rows
 - [LM Studio](https://lmstudio.ai/) 0.4.15 or newer; LocalHub is live-tested
   with 0.4.20
 - The current [Codex CLI](https://developers.openai.com/codex/cli), available

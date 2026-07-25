@@ -23,6 +23,32 @@ test("CLI turns renderer startup failures into a concise fix", async () => {
   ]);
 });
 
+test("CLI rejects a clipped terminal before entering alternate-screen mode", async () => {
+  let tuiRuns = 0;
+  const result = await captureErrors(() =>
+    main([], {
+      arch: "arm64",
+      configFile: "/test/config.json",
+      interactive: true,
+      load: async () => defaultConfig(),
+      platform: "darwin",
+      runInteractive: async () => {
+        tuiRuns += 1;
+        return { kind: "quit" };
+      },
+      terminalColumns: 80,
+      terminalRows: 12,
+    }),
+  );
+
+  expect(result.code).toBe(2);
+  expect(tuiRuns).toBe(0);
+  expect(result.errors).toEqual([
+    "Terminal too small (80x12). LocalHub needs at least 80x18.",
+    "Fix: enlarge the terminal and rerun `lh`; use `lh status` meanwhile.",
+  ]);
+});
+
 test("CLI turns a Codex spawn race into a concise dependency fix", async () => {
   const result = await captureErrors(() =>
     main([], {
