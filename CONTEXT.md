@@ -108,6 +108,12 @@ A particular downloadable form of a model with a specific size and quality
 tradeoff, chosen before the model is run.
 _Avoid_: Run Profile, runtime setting
 
+**Model Capability**:
+A kind of input or behavior a model can actually support, such as images,
+documents, or Browser Tools. LocalHub never substitutes another model when a
+selected model lacks a required capability.
+_Avoid_: Enabled tool, Run Profile
+
 **Inference Request**:
 One submitted request for a model to produce a response.
 _Avoid_: Chat, model session
