@@ -51,6 +51,11 @@ A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
 _Avoid_: Fine-tune, training profile
 
+**Shared Model**:
+A model the Host has made visible to Members together with the choices and
+limits Members may use.
+_Avoid_: Installed model, public model
+
 **LocalHub Run**:
 The active period beginning when the Host explicitly starts LocalHub and ending
 only when the Host explicitly stops it. Closing a terminal or browser does not
