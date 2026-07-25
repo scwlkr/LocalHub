@@ -68,14 +68,20 @@ new requests, bounded by the model's Context Capacity.
 _Avoid_: Context Capacity, saved memory
 
 **Run Profile**:
-A saved, reproducible set of controls for how a model uses the Host Computer's
-memory, compute, context capacity, and serving behavior.
+A named, reproducible set of controls for how one Model Variant uses the Host
+Computer's memory, compute, context capacity, and serving behavior. A Model
+Variant may have multiple Run Profiles.
 _Avoid_: Fine-tune, training profile
 
 **Profile Test**:
 A trial that runs an exact Run Profile without silently changing it and reports
 whether it worked, how it performed, and what resources it used.
 _Avoid_: Auto-fit, recommended profile
+
+**Profile Result**:
+The recorded outcome and measurements from a Profile Test, used to compare Run
+Profiles for the same Model Variant.
+_Avoid_: Run Profile, estimate
 
 **Shared Model**:
 A model the Host has made visible to Members together with the choices and
