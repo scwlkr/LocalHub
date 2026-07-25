@@ -35,6 +35,12 @@ A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
 _Avoid_: Fine-tune, training profile
 
+**LocalHub Run**:
+The active period beginning when the Host explicitly starts LocalHub and ending
+only when the Host explicitly stops it. Closing a terminal or browser does not
+end a LocalHub Run.
+_Avoid_: Terminal session, browser session
+
 **Model Training**:
 Changing a model itself using examples or datasets. Model Training is not part
 of LocalHub v1.
