@@ -30,6 +30,16 @@ The LAN-only entry point through which Members use LocalHub services exposed by
 the Host.
 _Avoid_: Public endpoint, internet gateway
 
+**Browser Chat**:
+The Local Gateway interface where a Member talks with a model and deliberately
+submits content. It is not a way to browse or control the Member's computer.
+_Avoid_: Remote desktop, local file browser
+
+**Tool Runner**:
+A local program that performs computer and file actions on the same computer
+and with the same operating-system permissions as the person who started it.
+_Avoid_: Host tool service, remote shell
+
 **Run Profile**:
 A saved, reproducible set of controls for how a model uses the Host Computer's
 memory, compute, context capacity, and serving behavior.
