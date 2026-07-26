@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LocalHub Member Browser Chat — Prototype</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --ink: #18201d;
+        --muted: #66716c;
+        --line: #dce4df;
+        --panel: #ffffff;
+        --soft: #f2f6f3;
+        --green: #16765a;
+        --green-soft: #dff5ec;
+        --amber: #a85d00;
+        --amber-soft: #fff1d4;
+        --red: #a33a3a;
+        --red-soft: #ffe7e3;
+        --blue: #2765ba;
+        --shadow: 0 18px 60px rgba(21, 38, 31, 0.12);
+      }
+
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; overflow-x: hidden; background: #e9efeb; color: var(--ink); }
+      button, input, select { font: inherit; }
+      button { cursor: pointer; }
+      .prototype-ribbon {
+        position: fixed; z-index: 50; top: 12px; left: 50%; transform: translateX(-50%);
+        padding: 6px 11px; border: 1px solid rgba(255,255,255,.35); border-radius: 999px;
+        color: white; background: rgba(20, 27, 24, .82); backdrop-filter: blur(10px);
+        font-size: 10px; letter-spacing: .12em; font-weight: 800; text-transform: uppercase;
+      }
+      #app { min-height: 100vh; padding: 48px 20px 112px; }
+      .shell { width: min(1500px, 100%); min-height: calc(100vh - 160px); margin: 0 auto; overflow: hidden; }
+      .brand { display: flex; align-items: center; gap: 10px; font-weight: 850; }
+      .mark { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--green); color: white; font-size: 13px; }
+      .eyebrow { color: var(--muted); font-size: 11px; letter-spacing: .1em; font-weight: 800; text-transform: uppercase; }
+      .small { color: var(--muted); font-size: 12px; line-height: 1.45; }
+      .tiny { color: var(--muted); font-size: 10px; line-height: 1.4; }
+      .title { margin: 4px 0 0; font-size: 20px; line-height: 1.15; }
+      .row { display: flex; align-items: center; gap: 8px; }
+      .spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .stack { display: grid; gap: 10px; }
+      .pill, .status, .limit {
+        display: inline-flex; align-items: center; gap: 6px; width: fit-content;
+        border: 1px solid var(--line); border-radius: 999px; padding: 5px 9px;
+        background: white; color: #415049; font-size: 11px; font-weight: 700;
+      }
+      .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #38a77d; box-shadow: 0 0 0 3px var(--green-soft); }
+      .status.warn::before { background: #e7941a; box-shadow: 0 0 0 3px var(--amber-soft); }
+      .status.bad::before { background: #cf5151; box-shadow: 0 0 0 3px var(--red-soft); }
+      .primary, .secondary, .danger, .ghost {
+        border-radius: 10px; padding: 9px 12px; border: 1px solid transparent; font-size: 12px; font-weight: 800;
+      }
+      .primary { background: var(--green); color: white; }
+      .secondary { background: white; color: var(--ink); border-color: var(--line); }
+      .danger { background: var(--red-soft); color: var(--red); border-color: #f4c9c3; }
+      .ghost { background: transparent; color: inherit; border-color: currentColor; }
+      .card { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 13px; }
+      .card h3 { margin: 0 0 5px; font-size: 13px; }
+      .card p { margin: 0; }
+      .divider { height: 1px; background: var(--line); }
+      .icon-box { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--soft); font-size: 14px; flex: 0 0 auto; }
+      .tool-toggle { display: flex; align-items: start; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+      .tool-toggle:last-child { border: 0; }
+      .switch { width: 36px; height: 21px; border: 0; border-radius: 999px; padding: 3px; background: #c8d2cc; }
+      .switch::after { content: ""; display: block; width: 15px; height: 15px; border-radius: 50%; background: white; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+      .switch.on { background: var(--green); }
+      .switch.on::after { transform: translateX(15px); }
+      .activity { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: start; padding: 10px 0; border-bottom: 1px solid var(--line); }
+      .activity:last-child { border: 0; }
+      .activity .dot { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px; background: var(--green-soft); color: var(--green); font-size: 10px; font-weight: 900; }
+      .activity.pending .dot { background: var(--amber-soft); color: var(--amber); }
+      .activity.failed .dot { background: var(--red-soft); color: var(--red); }
+      .progress { height: 5px; overflow: hidden; border-radius: 999px; background: #dce7e0; }
+      .progress span { display: block; width: 63%; height: 100%; background: var(--green); }
+      .message { max-width: 82%; padding: 12px 14px; border-radius: 16px; font-size: 13px; line-height: 1.55; }
+      .message.member { justify-self: end; background: #20352d; color: white; border-bottom-right-radius: 4px; }
+      .message.ai { background: white; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+      .message .sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+      .source-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #bbd2c5; border-radius: 7px; padding: 4px 7px; background: #f3fbf7; color: #285f48; font-size: 10px; font-weight: 800; }
+      .composer { display: grid; gap: 9px; padding: 12px; border: 1px solid var(--line); border-radius: 16px; background: white; box-shadow: 0 12px 30px rgba(28,45,37,.08); }
+      .composer textarea { width: 100%; min-height: 54px; resize: none; border: 0; outline: 0; color: var(--ink); background: transparent; font: inherit; }
+      .attachment { display: inline-flex; gap: 7px; align-items: center; border-radius: 9px; background: #eef4ff; color: #2e568e; padding: 6px 8px; font-size: 11px; font-weight: 750; }
+      .browser-only { display: flex; align-items: center; gap: 7px; color: var(--green); font-size: 11px; font-weight: 800; }
+      .browser-only::before { content: "◉"; }
+      .failure { border: 1px solid #f1c8c4; border-radius: 11px; padding: 10px; background: #fff8f6; }
+      .failure strong { display: block; color: var(--red); font-size: 12px; }
+      .failure span { display: block; margin-top: 3px; color: #76504c; font-size: 10px; line-height: 1.35; }
+      .approval {
+        position: absolute; z-index: 15; inset: 0; display: grid; place-items: center; padding: 24px;
+        background: rgba(17, 27, 23, .62); backdrop-filter: blur(5px);
+      }
+      .approval-card { width: min(460px, 100%); border-radius: 18px; padding: 20px; background: white; box-shadow: var(--shadow); }
+      .approval-card .action-preview { margin: 14px 0; border: 1px solid #efd49e; border-radius: 12px; padding: 12px; background: #fff9ed; }
+      .approval-card h2 { margin: 8px 0; font-size: 20px; }
+      .entry-wrap { grid-column: 1 / -1; min-height: 580px; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 40% 20%, #edf9f3, #dfeae4 55%, #d2ded7); }
+      .entry-card { width: min(480px, 100%); padding: 26px; border: 1px solid rgba(255,255,255,.7); border-radius: 22px; background: rgba(255,255,255,.88); box-shadow: var(--shadow); }
+      .entry-card label { display: grid; gap: 6px; margin-top: 14px; color: #4c5d55; font-size: 11px; font-weight: 800; }
+      .entry-card input, .entry-card select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 11px; background: white; color: var(--ink); }
+      .notice { border-left: 3px solid var(--amber); padding: 9px 11px; background: var(--amber-soft); color: #6f4b17; font-size: 11px; line-height: 1.45; }
+      .output-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .output { min-height: 74px; border: 1px dashed #afc4b8; border-radius: 11px; padding: 10px; background: #f8fbf9; }
+
+      /* Variant A — quiet conversation with a transparent sidecar. */
+      .variant-a.shell { position: relative; display: grid; grid-template-columns: 220px minmax(420px, 1fr) 310px; border: 1px solid #d7e1da; border-radius: 22px; background: #f7faf8; box-shadow: var(--shadow); }
+      .variant-a .left { padding: 18px; border-right: 1px solid var(--line); background: #edf4ef; }
+      .variant-a .main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
+      .variant-a .main-head { padding: 16px 20px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.76); }
+      .variant-a .messages { display: grid; align-content: end; gap: 12px; overflow: auto; padding: 24px; }
+      .variant-a .compose-wrap { padding: 0 20px 20px; }
+      .variant-a .right { overflow: auto; padding: 18px; border-left: 1px solid var(--line); background: white; }
+      .thread { margin-top: 14px; border-radius: 11px; padding: 10px; color: #5b6761; font-size: 11px; }
+      .thread.active { background: white; color: var(--ink); box-shadow: 0 4px 14px rgba(24,44,34,.07); }
+
+      /* Variant B — operational cockpit, all state in the open. */
+      .variant-b.shell { position: relative; border: 1px solid #2d4038; border-radius: 16px; background: #101915; color: #e9f1ed; box-shadow: 0 24px 80px rgba(5,12,9,.3); }
+      .variant-b .cockpit-head { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #2b3a34; background: #16211c; }
+      .variant-b .cockpit { display: grid; grid-template-columns: 280px minmax(420px, 1fr) 320px; min-height: 650px; }
+      .variant-b .bay { min-width: 0; padding: 16px; border-right: 1px solid #2b3a34; }
+      .variant-b .bay:last-child { border: 0; }
+      .variant-b .card, .variant-b .composer, .variant-b .message.ai { border-color: #344940; background: #17231e; color: #e9f1ed; }
+      .variant-b .small, .variant-b .tiny, .variant-b .eyebrow { color: #92a89e; }
+      .variant-b .divider { background: #344940; }
+      .variant-b .tool-toggle, .variant-b .activity { border-color: #304139; }
+      .variant-b .pill, .variant-b .limit, .variant-b .status { border-color: #3b5047; background: #1d2c25; color: #c8dbd2; }
+      .variant-b .message.member { background: #b6f3dc; color: #12251e; }
+      .variant-b .composer textarea { color: #e9f1ed; }
+      .variant-b .operation-feed { display: grid; align-content: end; gap: 12px; min-height: 490px; }
+      .meter { display: grid; gap: 5px; margin-top: 10px; }
+      .meter-track { height: 7px; overflow: hidden; border-radius: 2px; background: #2d3e36; }
+      .meter-track span { display: block; width: var(--fill,50%); height: 100%; background: #50d6a7; }
+
+      /* Variant C — sourcebook: answer, evidence, and browser-owned artifacts. */
+      .variant-c.shell { position: relative; display: grid; grid-template-columns: 245px minmax(430px, 1fr) 335px; border: 1px solid #d9d0bd; border-radius: 5px; background: #fbf7ed; box-shadow: 0 22px 70px rgba(63,49,28,.17); }
+      .variant-c .folio { padding: 20px; border-right: 1px solid #d9d0bd; background: #efe7d6; }
+      .variant-c .paper { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; background-image: linear-gradient(#e8dfcc 1px, transparent 1px); background-size: 100% 29px; }
+      .variant-c .paper-head { padding: 18px 22px; border-bottom: 1px double #cfc3aa; background: rgba(255,252,245,.92); }
+      .variant-c .messages { display: grid; align-content: end; gap: 13px; padding: 24px; }
+      .variant-c .compose-wrap { padding: 0 22px 20px; }
+      .variant-c .docket { overflow: auto; padding: 20px; border-left: 1px solid #d9d0bd; background: #f5efe2; }
+      .variant-c .card, .variant-c .composer, .variant-c .message.ai { border-color: #d9d0bd; border-radius: 4px; background: #fffdf7; }
+      .variant-c .message.member { border-radius: 4px; background: #42473d; }
+      .variant-c .primary, .variant-c .secondary, .variant-c .danger { border-radius: 3px; }
+      .variant-c .section-label { margin: 18px 0 8px; border-bottom: 1px solid #bbaa86; padding-bottom: 5px; color: #695c43; font-family: Georgia, serif; font-size: 13px; font-style: italic; }
+      .citation-row { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 8px 0; border-bottom: 1px solid #ddd3bf; font-size: 11px; }
+      .citation-row b { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid #a99875; border-radius: 50%; }
+
+      .prototype-controls {
+        position: fixed; z-index: 60; left: 50%; bottom: 18px; transform: translateX(-50%);
+        display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 20px); overflow-x: auto;
+        padding: 8px; border: 1px solid rgba(255,255,255,.2); border-radius: 15px;
+        background: rgba(16,25,21,.93); box-shadow: 0 15px 45px rgba(0,0,0,.25); color: white; backdrop-filter: blur(14px);
+      }
+      .prototype-controls .group { display: flex; flex: 0 0 auto; gap: 4px; }
+      .prototype-controls button, .prototype-controls select {
+        border: 1px solid #405249; border-radius: 9px; padding: 7px 10px; background: #223129; color: #dcebe4; font-size: 11px; font-weight: 800;
+      }
+      .prototype-controls button.active { border-color: #7ee1ba; background: #235c47; color: white; }
+      .prototype-controls .control-label { padding-left: 5px; color: #91a79d; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; }
+
+      @media (max-width: 900px) {
+        #app { padding: 42px 8px 110px; }
+        .shell { min-height: calc(100vh - 140px); }
+        .variant-a.shell, .variant-c.shell { grid-template-columns: 1fr; border-radius: 14px; }
+        .variant-a .left, .variant-a .right, .variant-c .folio, .variant-c .docket { border: 0; }
+        .variant-a .left, .variant-c .folio { display: flex; align-items: center; gap: 8px; overflow-x: auto; padding: 11px; border-bottom: 1px solid var(--line); }
+        .variant-a .left .brand, .variant-c .folio .brand { flex: 0 0 auto; }
+        .variant-a .left .eyebrow, .variant-a .left .thread:not(.active), .variant-c .folio .eyebrow, .variant-c .folio .thread:not(.active) { display: none; }
+        .variant-a .left .thread, .variant-c .folio .thread { margin: 0; white-space: nowrap; }
+        .variant-a .right, .variant-c .docket { max-height: none; border-top: 1px solid var(--line); }
+        .variant-a .messages, .variant-c .messages { min-height: 410px; padding: 16px 12px; }
+        .variant-a .compose-wrap, .variant-c .compose-wrap { padding: 0 10px 12px; }
+        .variant-a .main-head, .variant-c .paper-head { padding: 13px 12px; }
+        .variant-b .cockpit-head { grid-template-columns: 1fr auto; }
+        .variant-b .cockpit-head > :nth-child(2) { display: none; }
+        .variant-b .cockpit { grid-template-columns: 1fr; }
+        .variant-b .bay { border: 0; border-bottom: 1px solid #2b3a34; }
+        .variant-b .bay:nth-child(1) { order: 2; }
+        .variant-b .bay:nth-child(2) { order: 1; }
+        .variant-b .bay:nth-child(3) { order: 3; }
+        .variant-b .operation-feed { min-height: 430px; }
+        .message { max-width: 92%; }
+        .right-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+        .right-summary > * { min-width: 0; }
+      }
+
+      @media (max-width: 520px) {
+        .prototype-ribbon { top: 7px; white-space: nowrap; }
+        #app { padding-top: 34px; }
+        .title { font-size: 17px; }
+        .spread { flex-wrap: wrap; }
+        .row.wrap { flex-wrap: wrap; }
+        .hide-phone { display: none; }
+        .right-summary, .output-grid { grid-template-columns: 1fr; }
+        .approval { padding: 12px; }
+        .approval-card { padding: 16px; }
+        .prototype-controls { bottom: 8px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="prototype-ribbon">Throwaway prototype · no real requests or tools</div>
+    <main id="app"></main>
+    <nav class="prototype-controls" aria-label="Prototype controls">
+      <span class="control-label">Direction</span>
+      <div class="group">
+        <button type="button" data-variant="A">A · Quiet</button>
+        <button type="button" data-variant="B">B · Cockpit</button>
+        <button type="button" data-variant="C">C · Sourcebook</button>
+      </div>
+      <span class="control-label">Scenario</span>
+      <select id="scenario-select" aria-label="Prototype scenario">
+        <option value="entry">Member entry</option>
+        <option value="active">Active tools</option>
+        <option value="approval">External approval</option>
+        <option value="queue">Request queued</option>
+        <option value="failures">Honest failures</option>
+      </select>
+    </nav>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const state = {
+        variant: ["A", "B", "C"].includes(params.get("variant")) ? params.get("variant") : "A",
+        scenario: ["entry", "active", "approval", "queue", "failures"].includes(params.get("scenario")) ? params.get("scenario") : "active",
+        label: "Kitchen iPad",
+        model: "Family 24B · Accurate",
+        memory: "Recent 8 messages",
+        tools: { web: true, documents: true, browser: false },
+        cancelled: false,
+        approval: "pending",
+        cleaned: false,
+      };
+
+      const toolNames = {
+        web: ["Public web", "Search · Fetch · Research"],
+        documents: ["Documents & images", "Read attachments · Create local output"],
+        browser: ["Browser automation", "Temporary public-site session · approval to change"],
+      };
+
+      function setUrl() {
+        const query = new URLSearchParams({ variant: state.variant, scenario: state.scenario });
+        window.history.replaceState({}, "", `${window.location.pathname}?${query}`);
+      }
+
+      function toolToggles() {
+        return Object.entries(toolNames).map(([key, [name, detail]]) => `
+          <div class="tool-toggle">
+            <div><strong style="font-size:12px">${name}</strong><div class="tiny">${detail}</div></div>
+            <button class="switch ${state.tools[key] ? "on" : ""}" data-toggle-tool="${key}" aria-label="Toggle ${name}" aria-pressed="${state.tools[key]}"></button>
+          </div>`).join("");
+      }
+
+      function modelCard() {
+        return `
+          <div class="card stack">
+            <div class="spread"><span class="eyebrow">Shared Model</span><span class="status">Passing proof</span></div>
+            <div><strong>${state.model}</strong><div class="small">Vision + tools · exact passing profile</div></div>
+            <div class="row wrap"><span class="limit">Memory · ${state.memory}</span><span class="limit">30 min max</span></div>
+          </div>`;
+      }
+
+      function toolsCard() {
+        return `
+          <div class="card">
+            <div class="spread"><div><h3>Offered Tool Groups</h3><p class="tiny">Only groups proven for this Shared Model</p></div><span class="pill">Member choice</span></div>
+            ${toolToggles()}
+          </div>`;
+      }
+
+      function privacyCard() {
+        return `
+          <div class="card stack">
+            <div class="browser-only">History and outputs stay in this browser</div>
+            <p class="tiny">The Host processes this request but does not save prompts, answers, or attachments. Clearing this chat destroys its temporary Browser Session.</p>
+            <button class="secondary" data-action="clear-chat">${state.cleaned ? "Chat cleared · Browser Session destroyed" : "Clear chat & temporary browser"}</button>
+          </div>`;
+      }
+
+      function requestActivity() {
+        if (state.cancelled) {
+          return `<div class="activity failed"><span class="dot">×</span><div><strong>Request cancelled</strong><div class="tiny">Generation, fetches, and temporary processing stopped. Cleanup complete.</div></div><span class="tiny">terminal</span></div>`;
+        }
+        if (state.scenario === "queue") {
+          return `
+            <div class="activity pending"><span class="dot">3</span><div><strong>Queued — 3 requests ahead</strong><div class="tiny">${state.model} · position changed because one earlier request was cancelled</div><div class="progress" style="margin-top:8px"><span style="width:28%"></span></div></div><span class="tiny">27:41 left</span></div>
+            <div class="activity"><span class="dot">↻</span><div><strong>Connection can recover</strong><div class="tiny">This request continues if this browser briefly disconnects.</div></div><span class="tiny">SSE</span></div>`;
+        }
+        if (state.scenario === "failures") return failureList();
+        return `
+          <div class="activity"><span class="dot">✓</span><div><strong>Search · 5 results</strong><div class="tiny">Public web via LocalHub search · source IDs verified</div></div><span class="tiny">4.2s</span></div>
+          <div class="activity"><span class="dot">↗</span><div><strong>Fetch · city.example/water</strong><div class="tiny">1 of 5 pages · 6,420 / 10,000 characters used</div><div class="progress" style="margin-top:8px"><span></span></div></div><span class="tiny">8.1s</span></div>
+          <div class="activity pending"><span class="dot">…</span><div><strong>Research · comparing sources</strong><div class="tiny">3 / 12 searches · 2 / 20 reasoning rounds · 5 minute active limit</div></div><span class="tiny">live</span></div>`;
+      }
+
+      function failureList() {
+        return `
+          <div class="stack">
+            <div class="failure"><strong>Search unavailable</strong><span>Local SearXNG is not responding. No other provider was used.</span></div>
+            <div class="failure"><strong>Fetch blocked</strong><span>192.168.1.4 is a private address. Browser Tools can open public web addresses only.</span></div>
+            <div class="failure"><strong>Research timed out · partial result kept here</strong><span>5 minute active limit reached. 4 verified sources are available; unfinished claims are marked.</span></div>
+            <div class="failure"><strong>Attachment truncated before sending</strong><span>report.pdf exceeded the 24,000-character shared extraction budget.</span></div>
+            <div class="failure"><strong>Image input unsupported</strong><span>This exact Shared Model has no passing image capability. Choose a capable Shared Model or remove the image.</span></div>
+            <div class="failure"><strong>Browser change denied</strong><span>The action was not submitted. It will not retry automatically.</span></div>
+          </div>`;
+      }
+
+      function chatMessages() {
+        const queueText = state.scenario === "queue" ? "I’m holding your request until its turn. Nothing has started and you can cancel safely." : "The city plans to replace the lead service line at no cost to the homeowner. I found the application deadline and the two eligibility rules below.";
+        return `
+          <div class="message member">Check the attached notice against current city guidance. Summarize what our household needs to do.</div>
+          <div class="message ai">
+            ${queueText}
+            ${state.scenario === "queue" ? "" : `<div class="sources"><span class="source-chip">1 · City water office</span><span class="source-chip">2 · Program FAQ</span><span class="source-chip">⚑ 2 citations verified</span></div>`}
+          </div>`;
+      }
+
+      function composer() {
+        return `
+          <div class="composer">
+            <div class="row wrap">
+              <span class="attachment">▧ water-notice.pdf · 1.8 MB</span>
+              <span class="tiny">Current request only · deleted after terminal state</span>
+            </div>
+            <textarea aria-label="Message" placeholder="Ask ${state.model}…"></textarea>
+            <div class="spread">
+              <div class="row"><button class="secondary">＋ Attach</button><span class="tiny hide-phone">1 / 10 · 10 MB each</span></div>
+              <div class="row"><button class="danger" data-action="cancel-request">Cancel</button><button class="primary">Send</button></div>
+            </div>
+          </div>`;
+      }
+
+      function approvalOverlay() {
+        if (state.scenario !== "approval") return "";
+        const complete = state.approval !== "pending";
+        return `
+          <div class="approval">
+            <section class="approval-card">
+              <span class="eyebrow">Browser Automation paused</span>
+              <h2>${complete ? (state.approval === "approved" ? "Action approved" : "Action denied") : "Approve the external change?"}</h2>
+              <p class="small">LocalHub waited until immediately before this website-changing action.</p>
+              <div class="action-preview">
+                <strong>Submit city service-line application</strong>
+                <div class="small">city.example · sends name, address, and attached notice</div>
+              </div>
+              <div class="notice"><strong>No spend allowed.</strong> Purchases, subscriptions, donations, metered services, and trials stay blocked even if you approve.</div>
+              <div class="row" style="justify-content:flex-end; margin-top:16px">
+                ${complete ? `<button class="primary" data-action="approval-reset">Review again</button>` : `<button class="secondary" data-action="approval-deny">Deny</button><button class="primary" data-action="approval-approve">Approve once</button>`}
+              </div>
+            </section>
+          </div>`;
+      }
+
+      function entryContent() {
+        return `
+          <div class="entry-wrap">
+            <section class="entry-card">
+              <div class="brand"><span class="mark">LH</span><div>LocalHub<div class="tiny">Mac-Studio.local · household network</div></div></div>
+              <h1 style="font-size:28px; margin:28px 0 6px">Join Browser Chat</h1>
+              <p class="small">This Member Link grants inference only. It does not give access to Host files, shell, settings, or private network devices.</p>
+              <label>Member Label <input value="${state.label}" aria-label="Member Label" /><span class="tiny">A nickname for queue activity — not an account or identity check.</span></label>
+              <label>Shared Model <select><option>${state.model}</option><option>Family 8B · Fast text</option></select></label>
+              <label>Conversation Memory <select><option>${state.memory}</option><option>Current message only</option><option>Recent 20 messages</option></select><span class="tiny">Browser history stays here. Only the selected amount is resent.</span></label>
+              <div class="notice" style="margin:16px 0">Public-web tools send search terms and public page requests through the Host’s internet connection. No paid provider is used.</div>
+              <button class="primary" data-action="enter-chat" style="width:100%">Enter as ${state.label}</button>
+            </section>
+          </div>`;
+      }
+
+      function outputsCard() {
+        return `
+          <div class="card stack">
+            <div class="spread"><h3>Browser-owned output</h3><span class="pill">Not on Host</span></div>
+            <div class="output-grid">
+              <div class="output"><strong style="font-size:11px">Application checklist</strong><div class="tiny">Document · saved in this browser</div></div>
+              <div class="output"><strong style="font-size:11px">Pipe diagram</strong><div class="tiny">Image · saved in this browser</div></div>
+            </div>
+          </div>`;
+      }
+
+      function variantA() {
+        if (state.scenario === "entry") return `<section class="variant-a shell">${entryContent()}</section>`;
+        return `
+          <section class="variant-a shell">
+            <aside class="left">
+              <div class="brand"><span class="mark">LH</span><span>LocalHub</span></div>
+              <div class="eyebrow" style="margin-top:26px">This browser</div>
+              <div class="thread active"><strong>Water notice</strong><div class="tiny">Active · local only</div></div>
+              <div class="thread">Dinner planning<div class="tiny">Yesterday · local only</div></div>
+              <div class="thread">Garden notes<div class="tiny">Fri · local only</div></div>
+            </aside>
+            <div class="main">
+              <header class="main-head spread">
+                <div><span class="eyebrow">${state.label}</span><h1 class="title">Water notice</h1></div>
+                <div class="row wrap"><span class="pill">${state.model}</span><span class="status ${state.scenario === "failures" ? "bad" : state.scenario === "queue" ? "warn" : ""}">${state.scenario === "queue" ? "Queued · 3 ahead" : state.scenario === "failures" ? "Needs attention" : "Streaming"}</span></div>
+              </header>
+              <div class="messages">${chatMessages()}</div>
+              <div class="compose-wrap">${composer()}</div>
+            </div>
+            <aside class="right stack">
+              ${modelCard()}
+              <div class="card"><div class="spread"><h3>Live activity</h3><button class="danger" data-action="cancel-request">Cancel</button></div>${requestActivity()}</div>
+              ${toolsCard()}
+              ${outputsCard()}
+              ${privacyCard()}
+            </aside>
+            ${approvalOverlay()}
+          </section>`;
+      }
+
+      function variantB() {
+        if (state.scenario === "entry") return `<section class="variant-b shell">${entryContent()}</section>`;
+        return `
+          <section class="variant-b shell">
+            <header class="cockpit-head">
+              <div class="brand"><span class="mark">LH</span><div>MEMBER CONSOLE<div class="tiny">${state.label} · Browser-owned workspace</div></div></div>
+              <span class="status ${state.scenario === "failures" ? "bad" : state.scenario === "queue" ? "warn" : ""}">${state.scenario === "queue" ? "QUEUE 03" : state.scenario === "failures" ? "DEGRADED" : "REQUEST LIVE"}</span>
+              <div class="row" style="justify-self:end"><span class="pill">${state.model}</span><button class="danger" data-action="cancel-request">STOP</button></div>
+            </header>
+            <div class="cockpit">
+              <aside class="bay stack">
+                <div><span class="eyebrow">Authority envelope</span><h2 class="title">What this chat may do</h2></div>
+                ${toolsCard()}
+                <div class="card stack"><h3>Hard boundaries</h3><div class="tiny">No Host files · No shell · No secrets · No private LAN · No admin · No paid actions</div></div>
+                ${privacyCard()}
+              </aside>
+              <main class="bay operation-feed">
+                <div class="spread"><div><span class="eyebrow">Conversation / water notice</span><h1 class="title">One request, fully observable</h1></div><span class="limit">Memory · 8 messages</span></div>
+                <div class="messages stack">${chatMessages()}</div>
+                ${composer()}
+              </main>
+              <aside class="bay stack">
+                <div><span class="eyebrow">Execution trace</span><h2 class="title">Request state</h2></div>
+                <div class="card">${requestActivity()}</div>
+                <div class="card">
+                  <div class="spread"><h3>Visible ceilings</h3><span class="pill">Host may lower</span></div>
+                  <div class="meter"><div class="spread tiny"><span>Search pages</span><span>1 / 5</span></div><div class="meter-track"><span style="--fill:20%"></span></div></div>
+                  <div class="meter"><div class="spread tiny"><span>Tool output</span><span>6.4k / 10k</span></div><div class="meter-track"><span style="--fill:64%"></span></div></div>
+                  <div class="meter"><div class="spread tiny"><span>Request time</span><span>02:18 / 30:00</span></div><div class="meter-track"><span style="--fill:8%"></span></div></div>
+                </div>
+                ${outputsCard()}
+              </aside>
+            </div>
+            ${approvalOverlay()}
+          </section>`;
+      }
+
+      function citations() {
+        return `
+          <div class="citation-row"><b>1</b><div><strong>City Water Office</strong><div class="tiny">city.example/water · fetched now · verified source ID</div></div></div>
+          <div class="citation-row"><b>2</b><div><strong>Replacement Program FAQ</strong><div class="tiny">city.example/faq · fetched now · verified source ID</div></div></div>
+          <div class="citation-row"><b>!</b><div><strong>Current-source rule</strong><div class="tiny">Missing or invented IDs are removed and flagged.</div></div></div>`;
+      }
+
+      function variantC() {
+        if (state.scenario === "entry") return `<section class="variant-c shell">${entryContent()}</section>`;
+        return `
+          <section class="variant-c shell">
+            <aside class="folio">
+              <div class="brand"><span class="mark">LH</span><span>LocalHub</span></div>
+              <div class="eyebrow" style="margin-top:24px">Browser folio</div>
+              <div class="thread active"><strong>Water notice</strong><div class="tiny">2 sources · 2 outputs</div></div>
+              <div class="thread">Dinner planning<div class="tiny">No sources</div></div>
+              <div class="thread">Garden notes<div class="tiny">4 sources</div></div>
+              <div class="notice hide-phone" style="margin-top:20px">Everything in this folio stays in this browser. The Host keeps operational metadata only.</div>
+            </aside>
+            <main class="paper">
+              <header class="paper-head spread">
+                <div><span class="eyebrow">${state.label} · ${state.memory}</span><h1 class="title">Water service-line notice</h1></div>
+                <div class="row wrap"><span class="pill">${state.model}</span><span class="status ${state.scenario === "failures" ? "bad" : state.scenario === "queue" ? "warn" : ""}">${state.scenario === "queue" ? "3 ahead" : state.scenario === "failures" ? "Partial" : "Cited"}</span></div>
+              </header>
+              <div class="messages">${chatMessages()}</div>
+              <div class="compose-wrap">${composer()}</div>
+            </main>
+            <aside class="docket">
+              <span class="eyebrow">Request docket</span>
+              <h2 class="section-label">Evidence</h2>
+              ${citations()}
+              <h2 class="section-label">Activity & limits</h2>
+              <div class="card">${requestActivity()}</div>
+              <h2 class="section-label">Tools offered</h2>
+              <div class="card">${toolToggles()}</div>
+              <h2 class="section-label">Browser-owned artifacts</h2>
+              ${outputsCard()}
+              <h2 class="section-label">Cleanup</h2>
+              ${privacyCard()}
+            </aside>
+            ${approvalOverlay()}
+          </section>`;
+      }
+
+      function render() {
+        setUrl();
+        document.body.dataset.variant = state.variant;
+        document.getElementById("app").innerHTML = state.variant === "A" ? variantA() : state.variant === "B" ? variantB() : variantC();
+        document.querySelectorAll("[data-variant]").forEach((button) => {
+          button.classList.toggle("active", button.dataset.variant === state.variant);
+        });
+        document.getElementById("scenario-select").value = state.scenario;
+      }
+
+      document.addEventListener("click", (event) => {
+        const variant = event.target.closest("[data-variant]")?.dataset.variant;
+        if (variant) state.variant = variant;
+        const tool = event.target.closest("[data-toggle-tool]")?.dataset.toggleTool;
+        if (tool) state.tools[tool] = !state.tools[tool];
+        const action = event.target.closest("[data-action]")?.dataset.action;
+        if (action === "clear-chat") state.cleaned = true;
+        if (action === "cancel-request") state.cancelled = true;
+        if (action === "enter-chat") state.scenario = "active";
+        if (action === "approval-approve") state.approval = "approved";
+        if (action === "approval-deny") state.approval = "denied";
+        if (action === "approval-reset") state.approval = "pending";
+        render();
+      });
+
+      document.getElementById("scenario-select").addEventListener("change", (event) => {
+        state.scenario = event.target.value;
+        state.cancelled = false;
+        state.approval = "pending";
+        render();
+      });
+
+      render();
+    </script>
+  </body>
+</html>
