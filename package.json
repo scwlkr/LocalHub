@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun run src/cli.ts",
+    "prototype:host-control-room": "bun run prototypes/host-model-control-room/server.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "format": "biome format --write .",
