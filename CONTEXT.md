@@ -56,16 +56,45 @@ A local program that performs computer and file actions on the same computer
 and with the same operating-system permissions as the person who started it.
 _Avoid_: Host tool service, remote shell
 
+**Host Tool**:
+An unsandboxed, Host-only capability that acts on the Host Computer with the
+LocalHub process's permissions and is never exposed through Member Browser Chat.
+_Avoid_: Browser Tool, Tool Runner
+
+**Tool Group**:
+A Host-approved set of related Browser Tools that one exact Shared Model has
+proven it can invoke. A Member may enable only the groups that Shared Model offers.
+_Avoid_: Plugin, Host Tool, Model Capability
+
 **Browser Tool**:
-A Host-approved capability available in Browser Chat that can use submitted
-chat content, Attachments, or the public web but cannot access Host files,
-shell commands, or private LAN devices.
+A capability in a Host-approved Tool Group that can use submitted chat content,
+Attachments, the public web, or temporary browser state but cannot access Host
+files, shell commands, Host secrets, private LAN devices, or admin controls.
 _Avoid_: Tool Runner, Host tool
 
 **Web Search**:
 A Browser Tool that finds and reads information from the public web without a
 paid or metered service.
 _Avoid_: Host network search, paid search API
+
+**Web Fetch**:
+A Browser Tool that reads one Member-named public HTTP or HTTPS page.
+_Avoid_: Web Search, Host URL fetch
+
+**Web Research**:
+A bounded, multi-source public-web investigation that returns a cited result to
+Browser Chat without creating a persistent Host-side report.
+_Avoid_: Web Search, saved research library
+
+**Browser Session**:
+Temporary browser state owned by one Browser Chat and isolated from the Host's
+normal browser data. It ends when that chat is cleared or LocalHub stops.
+_Avoid_: Host browser profile, Member account
+
+**Browser Automation**:
+A Browser Tool that uses a Browser Session to navigate and interact with public
+websites, pausing for Member approval before an external change.
+_Avoid_: Host browser control, private-LAN browser
 
 **Context Capacity**:
 The maximum amount of material a running model can consider for one response,
