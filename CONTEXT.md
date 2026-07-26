@@ -94,24 +94,38 @@ Profiles for the same Model Variant.
 _Avoid_: Run Profile, estimate
 
 **Shared Model**:
-A model the Host has made visible to Members together with the choices and
-limits Members may use.
+A Host-published name for one Installed Model through one exact, currently
+passing Run Profile, together with the choices and limits Members may use.
 _Avoid_: Installed model, public model
 
+**Model Storage**:
+Host-chosen storage controlled by LocalHub for verified model files and
+incomplete Model Acquisitions.
+_Avoid_: Downloads folder, model source
+
+**Model Acquisition**:
+A Host-approved attempt to bring one exact Model Variant from a chosen local
+file or public source into Model Storage. Incomplete or unverified data is not
+an Installed Model.
+_Avoid_: Model search, automatic download
+
 **Installed Model**:
-A model available from storage controlled by the Host, whether or not it has
-been made available to Members.
+A verified Model Variant held in Model Storage and identified by its content,
+whether or not it has been made available to Members. Moving or renaming it
+does not change its identity.
 _Avoid_: Shared Model, loaded model
 
 **Model Variant**:
-A particular downloadable form of a model with a specific size and quality
-tradeoff, chosen before the model is run.
+A particular immutable set of model files with fixed size and quality
+tradeoffs, chosen before the model is run. Different contents are a different
+Model Variant even when the names match.
 _Avoid_: Run Profile, runtime setting
 
 **Model Capability**:
-A kind of input or behavior a model can actually support, such as images,
-documents, or Browser Tools. LocalHub never substitutes another model when a
-selected model lacks a required capability.
+A kind of input or behavior proven for one exact Model Variant and Run Profile,
+such as images or Browser Tools. Names and metadata may suggest a capability
+but do not verify it, and LocalHub never substitutes another model when a
+selected model lacks it.
 _Avoid_: Enabled tool, Run Profile
 
 **Inference Request**:
