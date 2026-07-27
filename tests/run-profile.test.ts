@@ -322,7 +322,7 @@ function passingObservation(
       runtime,
       chatTemplateSha256: Bun.CryptoHasher.hash("sha256", "{{ messages }}", "hex"),
       controls: { ...controls(), contextSize },
-      contextPerSlot: contextSize / 2,
+      contextPerSlot: contextSize,
       slotCount: 2,
       kvLayout: "unified",
       placement: "Metal:0",

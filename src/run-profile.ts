@@ -625,7 +625,7 @@ function observationMismatches(
     runtime: revision.runtime,
     chatTemplateSha256: revision.chatTemplateSha256,
     controls: revision.controls,
-    contextPerSlot: Math.floor(revision.controls.contextSize / revision.controls.parallelSlots),
+    contextPerSlot: revision.controls.contextSize,
     slotCount: revision.controls.parallelSlots,
     kvLayout: revision.controls.kvUnified ? "unified" : "per-slot",
   };
