@@ -52,7 +52,7 @@ jobs:
           "LLAMA_SERVER=$llamaServer" | Out-File -FilePath $env:GITHUB_ENV -Append
           "TEST_MODEL=$modelPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Start tool-free llama.cpp Host
+      - name: Run native Windows real-model smoke
         shell: pwsh
         run: |
           $stdout = Join-Path $env:RUNNER_TEMP "llama-server.stdout.log"
@@ -80,31 +80,31 @@ jobs:
             -PassThru `
             -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr
-          "LLAMA_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-          for ($attempt = 0; $attempt -lt 120; $attempt++) {
-            try {
-              $health = Invoke-RestMethod -Uri "http://127.0.0.1:18881/health" -TimeoutSec 2
-              if ($health.status -eq "ok") { exit 0 }
-            } catch {
-              Start-Sleep -Seconds 1
+          try {
+            $healthy = $false
+            for ($attempt = 0; $attempt -lt 120; $attempt++) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:18881/health" -TimeoutSec 2
+                if ($health.status -eq "ok") {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Seconds 1
+              }
             }
+            if (-not $healthy) {
+              Get-Content $stderr
+              throw "llama-server did not become healthy"
+            }
+
+            Invoke-RestMethod -Uri "http://127.0.0.1:18881/props" | ConvertTo-Json -Depth 8
+            python scripts/research/codex_compat_probe.py real-smoke `
+              --codex $env:CODEX_EXE `
+              --base-url http://127.0.0.1:18881/v1
+          } finally {
+            Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
           }
-          Get-Content $stderr
-          throw "llama-server did not become healthy"
-
-      - name: Run native Windows real-model smoke
-        shell: pwsh
-        run: |
-          Invoke-RestMethod -Uri "http://127.0.0.1:18881/props" | ConvertTo-Json -Depth 8
-          python scripts/research/codex_compat_probe.py real-smoke `
-            --codex $env:CODEX_EXE `
-            --base-url http://127.0.0.1:18881/v1
-
-      - name: Stop native Windows llama.cpp Host
-        if: always()
-        shell: pwsh
-        run: Stop-Process -Id $env:LLAMA_PID -ErrorAction SilentlyContinue
 
       - name: Import an ephemeral Ubuntu WSL2 distribution
         id: wsl_import
