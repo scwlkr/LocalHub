@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { runCandidateSmoke, type AcceptanceDependencies } from "../src/acceptance.ts";
+import {
+  runCandidateSmoke,
+  runLifecycleSmoke,
+  type AcceptanceDependencies,
+} from "../src/acceptance.ts";
 import { validateEvidenceRecord, type EvidenceEnvironment } from "../src/evidence.ts";
 import {
   RELEASE_CANDIDATE_SCHEMA,
@@ -67,6 +71,120 @@ test("controlled external conditions drive only public commands and never become
   expect(JSON.stringify(record)).not.toContain("controlled-llama.invalid");
 });
 
+test("the lifecycle driver proves detached start, fresh health, explicit stop, and stopped recheck", async () => {
+  const commands: string[][] = [];
+  const outputs = [
+    '{"status": "running", "model": null, "builtInTools": false}',
+    '{"state": "running", "health": "ready"}',
+    '{"status": "stopped", "activeWork": 0}',
+    '{"state": "stopped", "acceptingWork": false}',
+  ];
+  const candidate = verifiedCandidate();
+  const record = await runLifecycleSmoke(
+    {
+      candidate,
+      candidateRecordPath: "/candidate/release-candidate.json",
+      executablePath: "/candidate/lh",
+      evidenceId: "t02-lifecycle",
+      environment: environment(),
+      seam: "assembled-release",
+      artifactLinks: ["https://github.com/scwlkr/LocalHub/issues/22"],
+    },
+    {
+      process: {
+        run: async (command) => {
+          commands.push(command);
+          return { code: 0, stdout: outputs[commands.length - 1] ?? "", stderr: "" };
+        },
+      },
+      clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
+      storage: { read: async () => new Uint8Array() },
+      network: { fetch },
+      llamaCpp: { origin: "controlled" },
+      responses: { origin: "controlled" },
+      failure: { activate: async () => undefined },
+    },
+  );
+
+  expect(commands).toEqual([
+    ["/candidate/lh", "run", "start"],
+    ["/candidate/lh", "run", "status"],
+    ["/candidate/lh", "stop"],
+    ["/candidate/lh", "run", "status"],
+  ]);
+  expect(record.gates[0]).toMatchObject({ journeyGateId: "LH-J1-004", status: "Passed" });
+});
+
+test("failed lifecycle diagnostics name only sanitized steps and status categories", async () => {
+  const diagnostics: string[] = [];
+  const originalError = console.error;
+  console.error = (...values: unknown[]) => diagnostics.push(values.map(String).join(" "));
+  let record: Awaited<ReturnType<typeof runLifecycleSmoke>> | undefined;
+  let attempts = 0;
+  try {
+    record = await runLifecycleSmoke(
+      {
+        candidate: verifiedCandidate(),
+        candidateRecordPath: "/private/candidate/release-candidate.json",
+        executablePath: "/private/candidate/lh",
+        evidenceId: "t02-failed-lifecycle",
+        environment: environment(),
+        seam: "assembled-release",
+        artifactLinks: ["https://github.com/scwlkr/LocalHub/issues/22"],
+      },
+      {
+        process: {
+          run: async () => {
+            attempts += 1;
+            return {
+              code: 1,
+              stdout: "private-machine.local secret raw output",
+              stderr:
+                attempts === 1
+                  ? "Cause: --version exceeded its finite deadline /private/path"
+                  : "/private/path",
+            };
+          },
+        },
+        clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
+        storage: { read: async () => new Uint8Array() },
+        network: { fetch },
+        llamaCpp: { origin: "controlled" },
+        responses: { origin: "controlled" },
+        failure: { activate: async () => undefined },
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  expect(diagnostics).toEqual([
+    "Lifecycle step start: runtime-version-timeout; raw output withheld.",
+    "Lifecycle step running-status: exit-nonzero; raw output withheld.",
+    "Lifecycle step stop: exit-nonzero; raw output withheld.",
+    "Lifecycle step stopped-status: exit-nonzero; raw output withheld.",
+  ]);
+  expect(JSON.stringify(record)).not.toContain("private-machine.local");
+  expect(record?.gates[0]?.status).toBe("Failed");
+});
+
+test("the CI lifecycle evidence script does not claim a physical Host", async () => {
+  const script = await Bun.file(
+    new URL("../scripts/run-lifecycle-smoke.ts", import.meta.url),
+  ).text();
+  expect(script).toContain('networkLane: "macOS arm64 loopback lifecycle"');
+  expect(script).not.toContain("Physical Apple-silicon Host");
+});
+
+test("CI archives and round-trips candidate symlinks instead of uploading the raw tree", async () => {
+  const workflow = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
+  expect(workflow).toContain('tar -czf "$archive" -C dist/candidates "$candidate_name"');
+  expect(workflow).toContain('tar -xzf "$archive" -C "$round_trip"');
+  expect(workflow).toContain('"$extracted/lh" release identity');
+  expect(workflow).toContain("dist/artifacts/\n            dist/evidence/");
+  expect(workflow).not.toContain("path: |\n            dist/candidates/");
+});
+
 function environment(): EvidenceEnvironment {
   return {
     hostHardware: "Controlled Apple Silicon lane",
@@ -117,6 +235,7 @@ function verifiedCandidate(): VerifiedReleaseCandidate {
       stateSchema: "localhub-legacy-config/v1",
       trust: { state: "unnotarized", statement: UNNOTARIZED_TRUST_STATEMENT },
       rollbackTarget: "legacy-lh@0.1.1",
+      runtime: null,
       dependencies: [
         { name: "LocalHub", version: "0.1.1", included: true },
         { name: "Bun", version: "1.3.14", included: true },

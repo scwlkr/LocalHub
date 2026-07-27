@@ -58,6 +58,18 @@ jobs:
       - name: Smoke test standalone executable
         run: ${{ matrix.executable }} --help
 
+      - name: Acquire exact zero-cost llama.cpp runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/vendor
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output dist/vendor/llama-b10107-bin-macos-arm64.tar.gz \
+            https://github.com/ggml-org/llama.cpp/releases/download/b10107/llama-b10107-bin-macos-arm64.tar.gz
+          actual="$(shasum -a 256 dist/vendor/llama-b10107-bin-macos-arm64.tar.gz | awk '{print $1}')"
+          expected="b9554ab4c9f6e91199f48387cb4ab27466fb1d724881f81463ef03f6370cfa32"
+          test "$actual" = "$expected"
+
       - name: Assemble exact macOS candidate
         if: runner.os == 'macOS'
         run: bun run candidate:assemble
@@ -73,16 +85,61 @@ jobs:
             dist/candidates/*/release-candidate.json \
             dist/evidence/t01-assembled-release.json
 
-      - name: Retain candidate and sanitized evidence
+      - name: Drive supervised LocalHub Run lifecycle
         if: runner.os == 'macOS'
+        id: lifecycle
+        continue-on-error: true
+        shell: bash
+        run: |
+          bun run candidate:lifecycle \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t02-supervised-run.json
+          dist/candidates/*/lh evidence validate \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t02-supervised-run.json
+
+      - name: Package and round-trip immutable candidate artifact
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          candidate_records=(dist/candidates/*/release-candidate.json)
+          test "${#candidate_records[@]}" -eq 1
+          candidate_dir="$(dirname "${candidate_records[0]}")"
+          candidate_name="$(basename "$candidate_dir")"
+          mkdir -p dist/artifacts
+          archive="dist/artifacts/localhub-macos-arm64-${GITHUB_SHA}.tar.gz"
+          tar -czf "$archive" -C dist/candidates "$candidate_name"
+          digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$digest" "$(basename "$archive")" > "${archive}.sha256"
+
+          round_trip="$(mktemp -d)"
+          tar -xzf "$archive" -C "$round_trip"
+          extracted="$round_trip/$candidate_name"
+          "$extracted/lh" release identity "$extracted/release-candidate.json" > /dev/null
+          "$extracted/lh" evidence validate \
+            "$extracted/release-candidate.json" \
+            dist/evidence/t01-assembled-release.json
+          "$extracted/lh" evidence validate \
+            "$extracted/release-candidate.json" \
+            dist/evidence/t02-supervised-run.json
+
+      - name: Retain candidate and sanitized evidence
+        if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: t01-macos-arm64-${{ github.sha }}
+          name: localhub-macos-arm64-${{ github.sha }}
           path: |
-            dist/candidates/
+            dist/artifacts/
             dist/evidence/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Enforce supervised lifecycle result
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        env:
+          LIFECYCLE_OUTCOME: ${{ steps.lifecycle.outcome }}
+        run: test "$LIFECYCLE_OUTCOME" = success
 
       - name: Test Windows source installer
         if: runner.os == 'Windows'

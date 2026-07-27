@@ -10,6 +10,9 @@ if (process.platform !== "darwin" || process.arch !== "arm64") {
 
 const repository = join(import.meta.dir, "..");
 const sourceExecutable = join(repository, "dist", "lh");
+const sourceLlamaArchive =
+  process.env.LOCALHUB_LLAMA_CPP_ARCHIVE ??
+  join(repository, "dist", "vendor", "llama-b10107-bin-macos-arm64.tar.gz");
 const commit = await command(["git", "rev-parse", "HEAD"], repository);
 const status = await command(["git", "status", "--porcelain", "--untracked-files=no"], repository);
 if (status.length !== 0) {
@@ -19,6 +22,12 @@ if (status.length !== 0) {
 await expectExit([process.execPath, "run", "scripts/build.ts"], 0);
 if (!(await Bun.file(sourceExecutable).exists())) {
   console.error("Missing dist/lh. Build the native standalone executable first.");
+  process.exit(2);
+}
+if (!(await Bun.file(sourceLlamaArchive).exists())) {
+  console.error(
+    "Missing exact llama.cpp b10107 macOS-arm64 archive. Set LOCALHUB_LLAMA_CPP_ARCHIVE or place it under dist/vendor.",
+  );
   process.exit(2);
 }
 const embeddedCommit = await command([sourceExecutable, "release", "build-commit"], repository);
@@ -47,6 +56,7 @@ const paths = await assembleExpandCandidate({
   commit,
   outputDirectory,
   sourceExecutable,
+  sourceLlamaArchive,
   tag: exactTag,
   testedOsVersion: `${productVersion} (${buildVersion})`,
   version: VERSION,

@@ -212,6 +212,7 @@ function verifiedCandidate(): VerifiedReleaseCandidate {
       stateSchema: "localhub-legacy-config/v1",
       trust: { state: "unnotarized", statement: UNNOTARIZED_TRUST_STATEMENT },
       rollbackTarget: "legacy-lh@0.1.1",
+      runtime: null,
       dependencies: [
         { name: "LocalHub", version: "0.1.1", included: true },
         { name: "Bun", version: "1.3.14", included: true },

@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
 import {
   chmod,
+  cp,
   copyFile,
   lstat,
   mkdir,
+  mkdtemp,
+  readdir,
   readFile,
+  readlink,
   realpath,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -13,6 +18,12 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const RELEASE_CANDIDATE_SCHEMA = "localhub.release-candidate/v1";
 export const RELEASE_MANIFEST_SCHEMA = "localhub.release-manifest/v1";
+export const LLAMA_CPP_BUILD = "b10107";
+export const LLAMA_CPP_COMMIT = "c0bc8591e8815c63cb01dd3f051a8b0df02501c9";
+export const LLAMA_CPP_ARCHIVE_NAME = "llama-b10107-bin-macos-arm64.tar.gz";
+export const LLAMA_CPP_ARCHIVE_SIZE = 10_804_162;
+export const LLAMA_CPP_ARCHIVE_SHA256 =
+  "b9554ab4c9f6e91199f48387cb4ab27466fb1d724881f81463ef03f6370cfa32";
 
 export const UNNOTARIZED_TRUST_STATEMENT =
   "Checksum verified and ad-hoc signed, but not notarized or reviewed by Apple. macOS may block first launch. Use System Settings → Privacy & Security → Open Anyway. Never disable Gatekeeper.";
@@ -28,10 +39,9 @@ const REQUIRED_DEPENDENCIES = [
   },
   {
     name: "llama.cpp",
-    version: "b10107",
-    included: false,
-    commit: "c0bc8591e8815c63cb01dd3f051a8b0df02501c9",
-    digest: "sha256:b9554ab4c9f6e91199f48387cb4ab27466fb1d724881f81463ef03f6370cfa32",
+    version: LLAMA_CPP_BUILD,
+    commit: LLAMA_CPP_COMMIT,
+    digest: `sha256:${LLAMA_CPP_ARCHIVE_SHA256}`,
   },
   { name: "Codex", version: "0.145.0", included: false },
   {
@@ -64,6 +74,20 @@ export interface ReleaseDependency {
   digest?: string;
 }
 
+export type RuntimeEntry =
+  | ({ kind: "file" } & FileIdentity)
+  | { kind: "symlink"; path: string; target: string };
+
+export interface LlamaRuntimeInventory {
+  root: "runtime/llama.cpp";
+  archive: {
+    name: typeof LLAMA_CPP_ARCHIVE_NAME;
+    size: typeof LLAMA_CPP_ARCHIVE_SIZE;
+    sha256: typeof LLAMA_CPP_ARCHIVE_SHA256;
+  };
+  files: RuntimeEntry[];
+}
+
 export interface ReleaseManifest {
   schema: typeof RELEASE_MANIFEST_SCHEMA;
   candidateId: string;
@@ -87,6 +111,7 @@ export interface ReleaseManifest {
   };
   rollbackTarget: string;
   dependencies: ReleaseDependency[];
+  runtime: { llamaCpp: LlamaRuntimeInventory } | null;
 }
 
 export interface VerifiedReleaseCandidate {
@@ -111,6 +136,7 @@ export interface ExpandReleaseManifestOptions {
   tag: string | null;
   testedOsVersion: string;
   version: string;
+  llamaRuntime?: LlamaRuntimeInventory;
 }
 
 export interface AssembleExpandCandidateOptions
@@ -118,12 +144,14 @@ export interface AssembleExpandCandidateOptions
   assembledAt: Date;
   outputDirectory: string;
   sourceExecutable: string;
+  sourceLlamaArchive?: string;
 }
 
 export interface AssembledCandidatePaths {
   candidateRecordPath: string;
   executablePath: string;
   manifestPath: string;
+  llamaRuntimeDirectory: string | null;
 }
 
 export function createExpandReleaseManifest(
@@ -154,8 +182,13 @@ export function createExpandReleaseManifest(
     rollbackTarget: `legacy-lh@${options.version}`,
     dependencies: [
       { name: "LocalHub", version: options.version, included: true, commit: options.commit },
-      ...REQUIRED_DEPENDENCIES.map((dependency) => ({ ...dependency })),
+      ...REQUIRED_DEPENDENCIES.map((dependency) => ({
+        ...dependency,
+        included:
+          dependency.name === "llama.cpp" ? Boolean(options.llamaRuntime) : dependency.included,
+      })),
     ],
+    runtime: options.llamaRuntime ? { llamaCpp: options.llamaRuntime } : null,
   };
 }
 
@@ -172,6 +205,52 @@ export async function assembleExpandCandidate(
   await copyFile(options.sourceExecutable, executablePath);
   await chmod(executablePath, 0o755);
 
+  let llamaRuntime: LlamaRuntimeInventory | undefined;
+  let llamaRuntimeDirectory: string | null = null;
+  if (options.sourceLlamaArchive) {
+    const archive = await fileIdentity(options.sourceLlamaArchive);
+    if (archive.size !== LLAMA_CPP_ARCHIVE_SIZE || archive.sha256 !== LLAMA_CPP_ARCHIVE_SHA256) {
+      throw new Error(
+        `llama.cpp archive must be exact ${LLAMA_CPP_ARCHIVE_NAME} (${LLAMA_CPP_ARCHIVE_SIZE} bytes, sha256:${LLAMA_CPP_ARCHIVE_SHA256}).`,
+      );
+    }
+    const staging = await mkdtemp(join(dirname(options.outputDirectory), ".llama-runtime-"));
+    try {
+      const extracted = Bun.spawn(["tar", "-xzf", options.sourceLlamaArchive, "-C", staging], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      const [code, stderr] = await Promise.all([
+        extracted.exited,
+        new Response(extracted.stderr).text(),
+      ]);
+      if (code !== 0) {
+        throw new Error(`Pinned llama.cpp archive extraction failed: ${stderr.trim()}`);
+      }
+      const extractedDirectory = join(staging, "llama-b10107");
+      llamaRuntimeDirectory = join(options.outputDirectory, "runtime", "llama.cpp");
+      await mkdir(dirname(llamaRuntimeDirectory), { recursive: true });
+      await cp(extractedDirectory, llamaRuntimeDirectory, {
+        recursive: true,
+        dereference: false,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      });
+      llamaRuntime = {
+        root: "runtime/llama.cpp",
+        archive: {
+          name: LLAMA_CPP_ARCHIVE_NAME,
+          size: LLAMA_CPP_ARCHIVE_SIZE,
+          sha256: LLAMA_CPP_ARCHIVE_SHA256,
+        },
+        files: await runtimeInventory(llamaRuntimeDirectory),
+      };
+    } finally {
+      await rm(staging, { recursive: true, force: true });
+    }
+  }
+
   const asset = { path: "lh", ...(await fileIdentity(executablePath)) };
   const manifest = createExpandReleaseManifest({
     asset,
@@ -179,6 +258,7 @@ export async function assembleExpandCandidate(
     tag: options.tag,
     testedOsVersion: options.testedOsVersion,
     version: options.version,
+    ...(llamaRuntime ? { llamaRuntime } : {}),
   });
   await writeJson(manifestPath, manifest);
   const candidate: ReleaseCandidate = {
@@ -189,7 +269,7 @@ export async function assembleExpandCandidate(
     manifest: { path: "release-manifest.json", ...(await fileIdentity(manifestPath)) },
   };
   await writeJson(candidateRecordPath, candidate);
-  return { candidateRecordPath, executablePath, manifestPath };
+  return { candidateRecordPath, executablePath, manifestPath, llamaRuntimeDirectory };
 }
 
 export async function verifyReleaseCandidate(
@@ -233,6 +313,7 @@ export async function verifyReleaseCandidate(
   }
 
   verifyDependencyPins(manifest);
+  await verifyRuntimeInventory(candidateDirectory, manifest);
   if (options.buildCommit !== manifest.release.commit) {
     throw new Error("Executing asset build commit does not match the candidate source commit.");
   }
@@ -291,6 +372,9 @@ function validateManifest(manifest: ReleaseManifest): void {
   }
   if (manifest.stateSchema !== "localhub-legacy-config/v1") {
     throw new Error("Release state schema does not match the expand-phase contract.");
+  }
+  if (manifest.runtime !== null && manifest.runtime?.llamaCpp?.root !== "runtime/llama.cpp") {
+    throw new Error("Release llama.cpp runtime root is missing or ambiguous.");
   }
   if (manifest.rollbackTarget !== `legacy-lh@${manifest.release.version}`) {
     throw new Error("Release rollback target is stale or ambiguous.");
@@ -415,9 +499,10 @@ function verifyDependencyPins(manifest: ReleaseManifest): void {
     if (matches.length !== 1 || matches[0]?.version !== pin.version) {
       throw new Error(`Release dependency ${pin.name} must be pinned to ${pin.version}.`);
     }
-    if (matches[0].included !== pin.included) {
+    const expectedIncluded = pin.name === "llama.cpp" ? manifest.runtime !== null : pin.included;
+    if (matches[0].included !== expectedIncluded) {
       throw new Error(
-        `Release dependency ${pin.name} inclusion must be declared as ${String(pin.included)}.`,
+        `Release dependency ${pin.name} inclusion must be declared as ${String(expectedIncluded)}.`,
       );
     }
     if ("commit" in pin && matches[0].commit !== pin.commit) {
@@ -425,6 +510,65 @@ function verifyDependencyPins(manifest: ReleaseManifest): void {
     }
     if ("digest" in pin && matches[0].digest !== pin.digest) {
       throw new Error(`Release dependency ${pin.name} digest does not match the settled pin.`);
+    }
+  }
+}
+
+async function verifyRuntimeInventory(
+  candidateDirectory: string,
+  manifest: ReleaseManifest,
+): Promise<void> {
+  if (manifest.runtime === null) return;
+  const runtime = manifest.runtime.llamaCpp;
+  if (
+    runtime.archive.name !== LLAMA_CPP_ARCHIVE_NAME ||
+    runtime.archive.size !== LLAMA_CPP_ARCHIVE_SIZE ||
+    runtime.archive.sha256 !== LLAMA_CPP_ARCHIVE_SHA256
+  ) {
+    throw new Error("Release llama.cpp archive identity does not match the settled pin.");
+  }
+  const root = resolve(candidateDirectory, runtime.root);
+  if (!isInside(candidateDirectory, root) || (await realpath(root)) !== root) {
+    throw new Error("Release llama.cpp runtime root escapes the assembled candidate.");
+  }
+  const observed = await runtimeInventory(root);
+  if (JSON.stringify(observed) !== JSON.stringify(runtime.files)) {
+    throw new Error("Release llama.cpp runtime inventory is incomplete or does not match disk.");
+  }
+  const server = runtime.files.find(
+    (entry) => entry.kind === "file" && entry.path === "llama-server",
+  );
+  if (!server) {
+    throw new Error("Release llama.cpp runtime does not include llama-server.");
+  }
+}
+
+async function runtimeInventory(directory: string): Promise<RuntimeEntry[]> {
+  const entries: RuntimeEntry[] = [];
+  await visit(directory, "");
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+
+  async function visit(root: string, relativeDirectory: string): Promise<void> {
+    const children = await readdir(join(root, relativeDirectory), { withFileTypes: true });
+    for (const child of children) {
+      const relativePath = relativeDirectory ? join(relativeDirectory, child.name) : child.name;
+      const absolutePath = join(root, relativePath);
+      if (child.isDirectory()) {
+        await visit(root, relativePath);
+        continue;
+      }
+      if (child.isSymbolicLink()) {
+        const target = await readlink(absolutePath);
+        if (isAbsolute(target) || target.split(/[\\/]/).includes("..")) {
+          throw new Error(`Runtime symlink ${relativePath} escapes the pinned runtime.`);
+        }
+        entries.push({ kind: "symlink", path: relativePath, target });
+        continue;
+      }
+      if (!child.isFile()) {
+        throw new Error(`Runtime entry ${relativePath} is not a regular file or symlink.`);
+      }
+      entries.push({ kind: "file", path: relativePath, ...(await fileIdentity(absolutePath)) });
     }
   }
 }

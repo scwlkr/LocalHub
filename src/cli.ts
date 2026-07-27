@@ -1,11 +1,23 @@
 #!/usr/bin/env bun
 
+import { dirname, join } from "node:path";
 import { buildCodexProcess, runCodex } from "./codex.ts";
 import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
 import { validateEvidenceRecord } from "./evidence.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
 import { verifyReleaseCandidate, type ReleaseAssetInspection } from "./release.ts";
+import {
+  RunCommandError,
+  defaultRunStateDirectory,
+  inspectLocalHubRun,
+  runBundleFromCandidate,
+  serveLocalHubRun,
+  startLocalHubRun,
+  stopLocalHubRun,
+  type LocalHubRunState,
+  type RunInspection,
+} from "./run.ts";
 import { collectRuntime } from "./runtime.ts";
 import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
@@ -20,6 +32,9 @@ Usage:
   lh setup           Configure Windows access with a guided wizard
   lh status          Show system, route, server, and model state
   lh doctor          Check setup and print concise fixes
+  lh run start       Explicitly start the detached LocalHub Run
+  lh run status      Show exact supervisor, runtime, listeners, and health
+  lh stop            Reject new work and stop only LocalHub-owned processes
   lh release identity <release-candidate.json>
                      Verify and print the exact assembled candidate identity
   lh evidence validate <release-candidate.json> <evidence.json>
@@ -58,12 +73,20 @@ export interface CliDependencies {
   save?: typeof saveConfig;
   terminalColumns?: number;
   terminalRows?: number;
+  runCandidateRecordPath?: string;
+  runStateDirectory?: string;
+  inspectRun?: (stateDirectory: string) => Promise<RunInspection>;
+  startRun?: typeof startLocalHubRun;
+  stopRun?: typeof stopLocalHubRun;
 }
 
 export async function main(
   args = Bun.argv.slice(2),
   dependencies: CliDependencies = {},
 ): Promise<number> {
+  if (args[0] === "__run-agent") {
+    return runSupervisorAgent(args, dependencies);
+  }
   if (args[0] === "release") {
     if (args.length === 2 && args[1] === "build-commit") {
       if (!/^[0-9a-f]{40}$/.test(BUILD_COMMIT)) {
@@ -121,6 +144,39 @@ export async function main(
       return 0;
     } catch (error) {
       console.error(`Evidence validation failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+  const runCommand = parseRunCommand(args);
+  if (runCommand) {
+    const executablePath = dependencies.executablePath ?? process.execPath;
+    const stateDirectory =
+      dependencies.runStateDirectory ?? defaultRunStateDirectory(dependencies.env ?? process.env);
+    const candidateRecordPath =
+      dependencies.runCandidateRecordPath ??
+      join(dirname(executablePath), "release-candidate.json");
+    if (runCommand === "status") {
+      const inspection = await (dependencies.inspectRun ?? inspectLocalHubRun)(stateDirectory);
+      console.log(JSON.stringify(inspection, null, 2));
+      return inspection.state === "failed" ? 1 : 0;
+    }
+    try {
+      const state =
+        runCommand === "start"
+          ? await (dependencies.startRun ?? startLocalHubRun)({
+              buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+              candidateRecordPath,
+              executablePath,
+              stateDirectory,
+              ...(dependencies.inspectReleaseAsset
+                ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+                : {}),
+            })
+          : await (dependencies.stopRun ?? stopLocalHubRun)({ stateDirectory });
+      console.log(JSON.stringify(runResult(runCommand, state), null, 2));
+      return 0;
+    } catch (error) {
+      renderRunFailure(error);
       return 1;
     }
   }
@@ -291,6 +347,114 @@ export async function main(
     console.error("Fix: reinstall Codex and confirm `codex --version` works in this shell.");
     return 1;
   }
+}
+
+async function runSupervisorAgent(args: string[], dependencies: CliDependencies): Promise<number> {
+  const parsed = parseSupervisorArgs(args);
+  if (!parsed) {
+    console.error("Invalid internal LocalHub supervisor arguments.");
+    return 2;
+  }
+  const executablePath = dependencies.executablePath ?? process.execPath;
+  try {
+    const candidate = await verifyReleaseCandidate(parsed.candidateRecordPath, executablePath, {
+      buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+      ...(dependencies.inspectReleaseAsset
+        ? { inspectAsset: dependencies.inspectReleaseAsset }
+        : {}),
+    });
+    await serveLocalHubRun({
+      bundle: runBundleFromCandidate(parsed.candidateRecordPath, candidate),
+      hostPort: parsed.hostPort,
+      llamaPort: parsed.llamaPort,
+      stateDirectory: parsed.stateDirectory,
+      startupDeadlineMs: 30_000,
+      stopDeadlineMs: 10_000,
+    });
+    return 0;
+  } catch (error) {
+    console.error(`LocalHub supervisor failed: ${errorMessage(error)}`);
+    return 1;
+  }
+}
+
+function parseRunCommand(args: string[]): "start" | "status" | "stop" | null {
+  if (args.length === 1 && args[0] === "stop") return "stop";
+  if (args.length === 2 && args[0] === "run") {
+    if (args[1] === "start" || args[1] === "status" || args[1] === "stop") {
+      return args[1];
+    }
+  }
+  return null;
+}
+
+function parseSupervisorArgs(args: string[]): {
+  candidateRecordPath: string;
+  stateDirectory: string;
+  hostPort: number;
+  llamaPort: number;
+} | null {
+  if (
+    args.length !== 9 ||
+    args[1] !== "--candidate" ||
+    args[3] !== "--state-dir" ||
+    args[5] !== "--host-port" ||
+    args[7] !== "--llama-port"
+  ) {
+    return null;
+  }
+  const hostPort = Number(args[6]);
+  const llamaPort = Number(args[8]);
+  if (
+    !Number.isInteger(hostPort) ||
+    !Number.isInteger(llamaPort) ||
+    hostPort < 1024 ||
+    hostPort > 65535 ||
+    llamaPort < 1024 ||
+    llamaPort > 65535 ||
+    hostPort === llamaPort
+  ) {
+    return null;
+  }
+  return {
+    candidateRecordPath: args[2] ?? "",
+    stateDirectory: args[4] ?? "",
+    hostPort,
+    llamaPort,
+  };
+}
+
+function runResult(
+  action: "start" | "stop",
+  state: LocalHubRunState | null,
+): Record<string, unknown> {
+  return {
+    action,
+    status: state?.status ?? "stopped",
+    acceptingWork: state?.acceptingWork ?? false,
+    activeWork: state?.activeWork ?? 0,
+    stop: state?.stop ?? null,
+    run: state,
+  };
+}
+
+function renderRunFailure(error: unknown): void {
+  const failure =
+    error instanceof RunCommandError
+      ? error.failure
+      : {
+          cause: errorMessage(error),
+          protectedState:
+            "No unverified process was signalled; models, LM Studio, configuration, and source files remain untouched.",
+          stillWorks: "The stopped LocalHub CLI remains available.",
+          repair: "Inspect the exact candidate and recorded loopback listeners.",
+          recheck: "Run `lh run status` again.",
+        };
+  console.error(`Cause: ${failure.cause}`);
+  console.error(`Protected state: ${failure.protectedState}`);
+  console.error(`Still works: ${failure.stillWorks}`);
+  console.error(`Repair: ${failure.repair}`);
+  console.error(`Recheck: ${failure.recheck}`);
 }
 
 function parseCommand(
