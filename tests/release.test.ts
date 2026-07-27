@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/cli.ts";
+import { EVIDENCE_SCHEMA } from "../src/evidence.ts";
 import {
   RELEASE_CANDIDATE_SCHEMA,
   RELEASE_MANIFEST_SCHEMA,
@@ -245,6 +246,114 @@ test("candidate verification rejects a false trust statement", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("the shipped evidence command rejects stale, malformed, sensitive, and mismatched records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "localhub-evidence-command-"));
+  try {
+    const sourceExecutable = join(directory, "built-lh");
+    const evidencePath = join(directory, "evidence.json");
+    await writeFile(sourceExecutable, "native-assembled-localhub");
+    const assembled = await assembleExpandCandidate({
+      assembledAt: new Date("2026-07-27T15:00:00.000Z"),
+      commit: "a".repeat(40),
+      outputDirectory: join(directory, "candidate"),
+      sourceExecutable,
+      tag: null,
+      testedOsVersion: "27.0 (26A5388g)",
+      version: "0.1.1",
+    });
+    const candidate = await verifyReleaseCandidate(
+      assembled.candidateRecordPath,
+      assembled.executablePath,
+    );
+    const validRecord = {
+      schema: EVIDENCE_SCHEMA,
+      evidenceId: "t01-public-negative-test",
+      seam: "assembled-release",
+      candidate: {
+        candidateId: candidate.candidate.candidateId,
+        commit: candidate.manifest.release.commit,
+        assetSha256: candidate.candidate.asset.sha256,
+        manifestSha256: candidate.candidate.manifest.sha256,
+      },
+      environment: {
+        hostHardware: "Apple Silicon test lane",
+        hostOsVersion: "macOS 27.0 (26A5388g)",
+        toolRunnerHardware: null,
+        toolRunnerOsVersion: null,
+        browsers: [],
+        networkLane: "Local assembled candidate",
+        modelVariantHashes: [],
+        companionHashes: [],
+        chatTemplate: null,
+        runProfileRevision: null,
+        effectiveSettings: null,
+        measurements: {
+          loadTimeMs: null,
+          firstTokenTimeMs: null,
+          throughputTokensPerSecond: null,
+          peakRamBytes: null,
+          peakGpuBytes: null,
+          queueTimeMs: null,
+          toolDurationMs: null,
+        },
+        testDate: "2026-07-27",
+      },
+      gates: [gateRecord()],
+    };
+
+    await writeFile(evidencePath, JSON.stringify(validRecord));
+    expect(
+      (
+        await captureOutput(() =>
+          main(["evidence", "validate", assembled.candidateRecordPath, evidencePath], {
+            executablePath: assembled.executablePath,
+          }),
+        )
+      ).code,
+    ).toBe(0);
+
+    const invalidRecords = [
+      { ...validRecord, candidate: { ...validRecord.candidate, assetSha256: "3".repeat(64) } },
+      { ...validRecord, gates: [{ ...gateRecord(), timestamp: "2026-07-27T14:00:00.000Z" }] },
+      { ...validRecord, gates: [{ ...gateRecord(), status: "Ambiguous" }] },
+      {
+        ...validRecord,
+        gates: [{ ...gateRecord(), observed: "Authorization: Bearer private-value" }],
+      },
+    ];
+    for (const invalid of invalidRecords) {
+      await writeFile(evidencePath, JSON.stringify(invalid));
+      expect(
+        (
+          await captureOutput(() =>
+            main(["evidence", "validate", assembled.candidateRecordPath, evidencePath], {
+              executablePath: assembled.executablePath,
+            }),
+          )
+        ).code,
+      ).toBe(1);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function gateRecord() {
+  return {
+    journeyGateId: "LH-J1-001",
+    requirementIds: ["LH-EVD-003"],
+    classification: "Mandatory",
+    status: "Passed",
+    action: "$CANDIDATE/lh --help",
+    expected: "The assembled candidate exposes public help.",
+    observed: "The public command matched the expected boundary.",
+    artifactLinks: ["https://github.com/scwlkr/LocalHub/actions/runs/1"],
+    tester: "LocalHub candidate acceptance driver",
+    timestamp: "2026-07-27T16:00:00.000Z",
+    priorAttempts: [],
+  };
+}
 
 function releaseManifest(asset: { size: number; sha256: string }) {
   return {

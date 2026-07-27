@@ -91,6 +91,15 @@ async function collectEnvironment(seam: EvidenceSeam): Promise<EvidenceEnvironme
     chatTemplate: null,
     runProfileRevision: null,
     effectiveSettings: null,
+    measurements: {
+      loadTimeMs: null,
+      firstTokenTimeMs: null,
+      throughputTokensPerSecond: null,
+      peakRamBytes: null,
+      peakGpuBytes: null,
+      queueTimeMs: null,
+      toolDurationMs: null,
+    },
     testDate: new Date().toISOString().slice(0, 10),
   };
 }

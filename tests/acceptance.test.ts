@@ -78,6 +78,15 @@ function environment(): EvidenceEnvironment {
     chatTemplate: null,
     runProfileRevision: null,
     effectiveSettings: null,
+    measurements: {
+      loadTimeMs: null,
+      firstTokenTimeMs: null,
+      throughputTokensPerSecond: null,
+      peakRamBytes: null,
+      peakGpuBytes: null,
+      queueTimeMs: null,
+      toolDurationMs: null,
+    },
     testDate: "2026-07-27",
   };
 }

@@ -39,6 +39,15 @@ export interface EvidenceEnvironment {
   chatTemplate: string | null;
   runProfileRevision: string | null;
   effectiveSettings: string | null;
+  measurements: {
+    loadTimeMs: number | null;
+    firstTokenTimeMs: number | null;
+    throughputTokensPerSecond: number | null;
+    peakRamBytes: number | null;
+    peakGpuBytes: number | null;
+    queueTimeMs: number | null;
+    toolDurationMs: number | null;
+  };
   testDate: string;
 }
 
@@ -134,6 +143,26 @@ function verifyEnvironment(value: unknown): asserts value is EvidenceEnvironment
       throw new Error(`Evidence environment.${field} must be a string or null.`);
     }
   }
+  if (!isRecord(value.measurements)) {
+    throw new Error("Evidence environment.measurements is missing.");
+  }
+  for (const field of [
+    "loadTimeMs",
+    "firstTokenTimeMs",
+    "throughputTokensPerSecond",
+    "peakRamBytes",
+    "peakGpuBytes",
+    "queueTimeMs",
+    "toolDurationMs",
+  ] as const) {
+    const measurement = value.measurements[field];
+    if (
+      measurement !== null &&
+      (typeof measurement !== "number" || !Number.isFinite(measurement) || measurement < 0)
+    ) {
+      throw new Error(`Evidence environment.measurements.${field} must be non-negative or null.`);
+    }
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value.testDate))) {
     throw new Error("Evidence environment.testDate must use YYYY-MM-DD.");
   }
@@ -169,8 +198,12 @@ function verifyGate(value: unknown, index: number, assembledAt: number, now: num
   for (const field of ["action", "expected", "observed", "tester"] as const) {
     expectNonEmptyString(value[field], `${label}.${field}`);
   }
-  if (!Array.isArray(value.artifactLinks) || !value.artifactLinks.every(isArtifactLink)) {
-    throw new Error(`Evidence ${label}.artifactLinks must contain HTTPS links.`);
+  if (
+    !Array.isArray(value.artifactLinks) ||
+    value.artifactLinks.length === 0 ||
+    !value.artifactLinks.every(isArtifactLink)
+  ) {
+    throw new Error(`Evidence ${label}.artifactLinks must contain at least one HTTPS link.`);
   }
   const timestamp = parseTimestamp(value.timestamp, `${label}.timestamp`);
   if (timestamp < assembledAt) {
@@ -185,6 +218,17 @@ function verifyGate(value: unknown, index: number, assembledAt: number, now: num
   const priorAttempts = value.priorAttempts.map((attempt, attemptIndex) =>
     verifyAttempt(attempt, label, attemptIndex, assembledAt, now),
   );
+  if (priorAttempts.some((attempt) => Date.parse(attempt.timestamp) > timestamp)) {
+    throw new Error(`Evidence ${label} has a prior attempt after its current result.`);
+  }
+  if (
+    value.status === "Passed" &&
+    priorAttempts.some(
+      (attempt) => typeof attempt.correction !== "string" || attempt.correction.trim().length === 0,
+    )
+  ) {
+    throw new Error(`Evidence ${label} must retain the correction for every failed attempt.`);
+  }
 
   return { ...(value as unknown as EvidenceGate), priorAttempts };
 }
