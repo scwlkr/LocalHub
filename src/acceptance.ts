@@ -168,7 +168,7 @@ export async function runLifecycleSmoke(
         passedSteps += 1;
       } else {
         console.error(
-          `Lifecycle step ${gate.label}: ${result.code === 0 ? "status-mismatch" : "exit-nonzero"}; raw output withheld.`,
+          `Lifecycle step ${gate.label}: ${lifecycleStatusCategory(result)}; raw output withheld.`,
         );
       }
     } catch {
@@ -222,4 +222,16 @@ export async function runLifecycleSmoke(
     environment: options.environment,
     gates: [composite],
   };
+}
+
+function lifecycleStatusCategory(result: AcceptanceProcessResult): string {
+  if (result.code === 0) return "status-mismatch";
+  if (result.stderr.includes("--version exceeded its finite deadline")) {
+    return "runtime-version-timeout";
+  }
+  if (result.stderr.includes("--list-devices exceeded its finite deadline")) {
+    return "runtime-device-timeout";
+  }
+  if (result.stderr.includes("did not become healthy")) return "health-timeout";
+  return "exit-nonzero";
 }

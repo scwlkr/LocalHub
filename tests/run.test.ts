@@ -213,7 +213,7 @@ test("stop preserves a failed Host when its recorded identity is not proven", as
 });
 
 macOSProcessTest(
-  "the real macOS supervisor boundary reaches health, reports no model proof, then closes both listeners",
+  "the real macOS boundary tolerates a serialized version probe beyond fifteen seconds",
   async () => {
     const root = await isolatedRoot();
     const stateDirectory = join(root, "state");
@@ -222,7 +222,10 @@ macOSProcessTest(
     const fakeLlama = join(runtimeDirectory, "llama-server");
     await writeFile(
       fakeLlama,
-      fakeLlamaSource({ preflightLockPath: join(root, "preflight.lock") }),
+      fakeLlamaSource({
+        preflightLockPath: join(root, "preflight.lock"),
+        versionDelayMs: 15_100,
+      }),
       {
         mode: 0o755,
       },
@@ -234,10 +237,10 @@ macOSProcessTest(
       hostPort,
       llamaPort,
       stateDirectory,
-      startupDeadlineMs: 2_000,
+      startupDeadlineMs: 20_000,
       stopDeadlineMs: 2_000,
     });
-    const running = await waitForState(stateDirectory, "running");
+    const running = await waitForState(stateDirectory, "running", 18_000);
     const health = await fetch(`http://127.0.0.1:${hostPort}/health`).then((response) =>
       response.json(),
     );
@@ -269,6 +272,7 @@ macOSProcessTest(
     await expect(fetch(`http://127.0.0.1:${hostPort}/health`)).rejects.toThrow();
     await expect(fetch(`http://127.0.0.1:${llamaPort}/health`)).rejects.toThrow();
   },
+  25_000,
 );
 
 macOSProcessTest(
@@ -439,8 +443,9 @@ async function availablePort(): Promise<number> {
 async function waitForState(
   stateDirectory: string,
   expected: LocalHubRunState["status"],
+  deadlineMs = 3_000,
 ): Promise<LocalHubRunState> {
-  const deadline = Date.now() + 3_000;
+  const deadline = Date.now() + deadlineMs;
   while (Date.now() < deadline) {
     try {
       const state = JSON.parse(await readFile(join(stateDirectory, "run-state.json"), "utf8"));
@@ -478,16 +483,20 @@ async function withDeadline<T>(promise: Promise<T>, checkpoint: string): Promise
 }
 
 function fakeLlamaSource(
-  options: { healthStatus?: number; preflightLockPath?: string } = {},
+  options: { healthStatus?: number; preflightLockPath?: string; versionDelayMs?: number } = {},
 ): string {
   return `#!/usr/bin/env bun
 import { rm, writeFile } from "node:fs/promises";
 const args = Bun.argv.slice(2);
 const lockPath = ${JSON.stringify(options.preflightLockPath ?? null)};
+const versionDelayMs = ${options.versionDelayMs ?? 0};
 if (args.includes("--version")) {
   if (lockPath) {
     await writeFile(lockPath, "version");
     await Bun.sleep(100);
+  }
+  if (versionDelayMs > 0) await Bun.sleep(versionDelayMs);
+  if (lockPath) {
     await rm(lockPath, { force: true });
   }
   console.log("version: 10107 (c0bc8591e)");

@@ -719,11 +719,11 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     const startupDeadline = Date.now() + options.startupDeadlineMs;
     const versionOutput = await runFinite(
       [options.bundle.llama.binaryPath, "--version"],
-      remainingDeadline(startupDeadline, 15_000),
+      remainingDeadline(startupDeadline),
     );
     const deviceOutput = await runFinite(
       [options.bundle.llama.binaryPath, "--list-devices"],
-      remainingDeadline(startupDeadline, 20_000),
+      remainingDeadline(startupDeadline),
     );
     if (!/version:\s*10107\b/.test(versionOutput) || !versionOutput.includes("c0bc8591e")) {
       throw new Error("the included binary did not report pinned build b10107 at c0bc8591e");
@@ -1194,8 +1194,8 @@ function assertPort(port: number, label: string): void {
   }
 }
 
-function remainingDeadline(overallDeadline: number, maximumMs: number): number {
-  return Math.max(1, Math.min(maximumMs, overallDeadline - Date.now()));
+function remainingDeadline(overallDeadline: number): number {
+  return Math.max(1, overallDeadline - Date.now());
 }
 
 function errorMessage(error: unknown): string {

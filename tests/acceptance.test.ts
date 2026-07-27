@@ -120,6 +120,7 @@ test("failed lifecycle diagnostics name only sanitized steps and status categori
   const originalError = console.error;
   console.error = (...values: unknown[]) => diagnostics.push(values.map(String).join(" "));
   let record: Awaited<ReturnType<typeof runLifecycleSmoke>> | undefined;
+  let attempts = 0;
   try {
     record = await runLifecycleSmoke(
       {
@@ -133,11 +134,17 @@ test("failed lifecycle diagnostics name only sanitized steps and status categori
       },
       {
         process: {
-          run: async () => ({
-            code: 1,
-            stdout: "private-machine.local secret raw output",
-            stderr: "/private/path",
-          }),
+          run: async () => {
+            attempts += 1;
+            return {
+              code: 1,
+              stdout: "private-machine.local secret raw output",
+              stderr:
+                attempts === 1
+                  ? "Cause: --version exceeded its finite deadline /private/path"
+                  : "/private/path",
+            };
+          },
         },
         clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
         storage: { read: async () => new Uint8Array() },
@@ -152,7 +159,7 @@ test("failed lifecycle diagnostics name only sanitized steps and status categori
   }
 
   expect(diagnostics).toEqual([
-    "Lifecycle step start: exit-nonzero; raw output withheld.",
+    "Lifecycle step start: runtime-version-timeout; raw output withheld.",
     "Lifecycle step running-status: exit-nonzero; raw output withheld.",
     "Lifecycle step stop: exit-nonzero; raw output withheld.",
     "Lifecycle step stopped-status: exit-nonzero; raw output withheld.",
@@ -167,6 +174,15 @@ test("the CI lifecycle evidence script does not claim a physical Host", async ()
   ).text();
   expect(script).toContain('networkLane: "macOS arm64 loopback lifecycle"');
   expect(script).not.toContain("Physical Apple-silicon Host");
+});
+
+test("CI archives and round-trips candidate symlinks instead of uploading the raw tree", async () => {
+  const workflow = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
+  expect(workflow).toContain('tar -czf "$archive" -C dist/candidates "$candidate_name"');
+  expect(workflow).toContain('tar -xzf "$archive" -C "$round_trip"');
+  expect(workflow).toContain('"$extracted/lh" release identity');
+  expect(workflow).toContain("dist/artifacts/\n            dist/evidence/");
+  expect(workflow).not.toContain("path: |\n            dist/candidates/");
 });
 
 function environment(): EvidenceEnvironment {

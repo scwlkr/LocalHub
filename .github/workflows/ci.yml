@@ -87,6 +87,8 @@ jobs:
 
       - name: Drive supervised LocalHub Run lifecycle
         if: runner.os == 'macOS'
+        id: lifecycle
+        continue-on-error: true
         shell: bash
         run: |
           bun run candidate:lifecycle \
@@ -96,16 +98,48 @@ jobs:
             dist/candidates/*/release-candidate.json \
             dist/evidence/t02-supervised-run.json
 
+      - name: Package and round-trip immutable candidate artifact
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          candidate_records=(dist/candidates/*/release-candidate.json)
+          test "${#candidate_records[@]}" -eq 1
+          candidate_dir="$(dirname "${candidate_records[0]}")"
+          candidate_name="$(basename "$candidate_dir")"
+          mkdir -p dist/artifacts
+          archive="dist/artifacts/localhub-macos-arm64-${GITHUB_SHA}.tar.gz"
+          tar -czf "$archive" -C dist/candidates "$candidate_name"
+          digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          printf '%s  %s\n' "$digest" "$(basename "$archive")" > "${archive}.sha256"
+
+          round_trip="$(mktemp -d)"
+          tar -xzf "$archive" -C "$round_trip"
+          extracted="$round_trip/$candidate_name"
+          "$extracted/lh" release identity "$extracted/release-candidate.json" > /dev/null
+          "$extracted/lh" evidence validate \
+            "$extracted/release-candidate.json" \
+            dist/evidence/t01-assembled-release.json
+          "$extracted/lh" evidence validate \
+            "$extracted/release-candidate.json" \
+            dist/evidence/t02-supervised-run.json
+
       - name: Retain candidate and sanitized evidence
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: localhub-macos-arm64-${{ github.sha }}
           path: |
-            dist/candidates/
+            dist/artifacts/
             dist/evidence/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Enforce supervised lifecycle result
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        env:
+          LIFECYCLE_OUTCOME: ${{ steps.lifecycle.outcome }}
+        run: test "$LIFECYCLE_OUTCOME" = success
 
       - name: Test Windows source installer
         if: runner.os == 'Windows'
