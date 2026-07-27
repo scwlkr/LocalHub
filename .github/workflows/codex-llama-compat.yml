@@ -144,8 +144,12 @@ jobs:
         if: steps.wsl_import.outcome == 'success'
         shell: pwsh
         run: |
-          $workspace = (wsl -d LocalHubProbe -- wslpath -a $env:GITHUB_WORKSPACE).Trim()
-          $codex = (wsl -d LocalHubProbe -- wslpath -a $env:CODEX_LINUX).Trim()
+          $workspaceDrive = $env:GITHUB_WORKSPACE.Substring(0, 1).ToLower()
+          $workspaceRest = $env:GITHUB_WORKSPACE.Substring(2).Replace('\', '/')
+          $workspace = "/mnt/$workspaceDrive$workspaceRest"
+          $codexDrive = $env:CODEX_LINUX.Substring(0, 1).ToLower()
+          $codexRest = $env:CODEX_LINUX.Substring(2).Replace('\', '/')
+          $codex = "/mnt/$codexDrive$codexRest"
           wsl -d LocalHubProbe -- chmod +x $codex
           wsl -d LocalHubProbe -- python3 `
             "$workspace/scripts/research/codex_compat_probe.py" `
