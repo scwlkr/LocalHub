@@ -53,6 +53,7 @@ test("editing an exact passing Run Profile creates an untested revision and deri
   expect(first.renderedLaunchCommand).toContain(`--alias ${first.id}`);
   expect(first.renderedLaunchCommand).toContain("--no-agent");
   expect(first.renderedLaunchCommand).toContain("--no-ui-mcp-proxy");
+  expect(first.renderedLaunchCommand).toContain("--log-verbosity 5 --log-colors off");
   expect(first.renderedLaunchCommand).toContain("--offline");
 
   const result = await testRunProfile(
