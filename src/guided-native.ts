@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Stats } from "node:fs";
-import { lstat, mkdir, statfs } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmod, lstat, mkdir, mkdtemp, rm, statfs } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConsoleSetupIO } from "./setup.ts";
 import { fileIdentity } from "./release.ts";
@@ -49,11 +49,11 @@ export function createNativeGuidedDependencies(
     currentInterfaces: currentPrivateInterfaces,
     resolveBonjourName,
     verifyPhysicalMember: (binding) => verifyPhysicalMember(binding, memberDeadlineMs),
-    startRun: async (modelsDirectory, member) => {
+    startRun: async (modelStorageDirectory, member) => {
       const run = await startLocalHubRun({
         ...options.run,
         startupDeadlineMs: memberDeadlineMs,
-        modelsDirectory,
+        modelStorageDirectory,
         member: {
           interface: member.interface,
           bonjourName: member.bonjourName,
@@ -154,7 +154,7 @@ export async function prepareModelStorage(
 
 export async function verifyPinnedRuntime(
   bundle: RunBundle,
-  modelStorage: string,
+  _modelStorage: string,
   deadlineMs = 30_000,
 ): Promise<GuidedRuntimeResult> {
   const deadline = Date.now() + deadlineMs;
@@ -178,9 +178,11 @@ export async function verifyPinnedRuntime(
   if (devices.length === 0) throw new Error("Pinned llama.cpp returned no Metal device result.");
 
   const port = await availableLoopbackPort();
-  const launch = buildLlamaLaunch(bundle, { modelsDirectory: modelStorage, port });
+  const routerModelsDirectory = await mkdtemp(join(tmpdir(), "localhub-sealed-router-"));
+  await chmod(routerModelsDirectory, 0o700);
+  const launch = buildLlamaLaunch(bundle, { modelsDirectory: routerModelsDirectory, port });
   const child = spawn(launch.command[0] ?? "", launch.command.slice(1), {
-    cwd: modelStorage,
+    cwd: routerModelsDirectory,
     env: runtimeEnvironment(),
     stdio: "ignore",
   });
@@ -210,6 +212,15 @@ export async function verifyPinnedRuntime(
     }
     if (!healthy)
       throw new Error("Pinned llama.cpp health did not pass before the finite deadline.");
+    const modelsResponse = await fetch(`http://127.0.0.1:${port}/models`, {
+      signal: AbortSignal.timeout(Math.max(1, Math.min(1_000, remaining(deadline)))),
+    });
+    const routerModels: unknown = modelsResponse.ok ? await modelsResponse.json() : null;
+    if (!Array.isArray(routerModels) || routerModels.length !== 0) {
+      throw new Error(
+        "Pinned llama.cpp sealed router exposed a model before exact Installed Model selection.",
+      );
+    }
     child.kill("SIGTERM");
     if (!(await waitForExit(child, Math.min(5_000, remaining(deadline))))) {
       child.kill("SIGKILL");
@@ -226,6 +237,8 @@ export async function verifyPinnedRuntime(
       }
     }
     throw error;
+  } finally {
+    await rm(routerModelsDirectory, { recursive: true, force: true });
   }
   return {
     build: "b10107",

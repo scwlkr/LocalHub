@@ -39,6 +39,16 @@ const firstRunStatePath = join(workspace, "first-run.json");
 const runStateDirectory = join(workspace, "run-state");
 await mkdir(modelStoragePath, { mode: 0o700 });
 await prepareModelStorage(modelStoragePath);
+const unverifiedStagingPath = join(modelStoragePath, ".localhub-staging", "unverified-partial");
+await mkdir(unverifiedStagingPath, { recursive: true, mode: 0o700 });
+await Promise.all([
+  writeFile(join(modelStoragePath, "unverified-adoptable.gguf"), deterministicGguf(), {
+    mode: 0o600,
+  }),
+  writeFile(join(unverifiedStagingPath, "partial.gguf"), deterministicGguf().subarray(0, 64), {
+    mode: 0o600,
+  }),
+]);
 const sourcePath = selectedSourcePath
   ? resolve(selectedSourcePath)
   : join(workspace, "deterministic-q4_k.gguf");

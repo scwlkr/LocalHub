@@ -340,7 +340,9 @@ export async function runModelAcquisitionSmoke(
     );
     const run = isRecord(started?.run) ? started.run : null;
     const host = isRecord(run?.host) ? run.host : null;
+    const llama = isRecord(run?.llama) ? run.llama : null;
     const origin = stringField(host, "origin");
+    const llamaOrigin = stringField(llama, "origin");
     if (origin && contentId) {
       const response = await dependencies.network.fetch(`${origin}/models`);
       const body: unknown = response.ok ? await response.json() : null;
@@ -354,6 +356,11 @@ export async function runModelAcquisitionSmoke(
       ) {
         passedSteps += 1;
       }
+    }
+    if (llamaOrigin) {
+      const response = await dependencies.network.fetch(`${llamaOrigin}/models`);
+      const body: unknown = response.ok ? await response.json() : null;
+      if (Array.isArray(body) && body.length === 0) passedSteps += 1;
     }
 
     const stoppedResult = jsonObjectResult(
@@ -374,7 +381,7 @@ export async function runModelAcquisitionSmoke(
     }
   }
 
-  const passed = passedSteps === 8;
+  const passed = passedSteps === 9;
   const contentId = stringField(installed, "id");
   const architecture = stringField(installed, "architecture");
   const parameterCount = numberField(installed, "parameterCount");
@@ -387,12 +394,12 @@ export async function runModelAcquisitionSmoke(
     classification: "Mandatory",
     status: passed ? "Passed" : "Failed",
     action:
-      "$CANDIDATE/lh model prepare exact local GGUF with published SHA-256; $CANDIDATE/lh model list; $CANDIDATE/lh model import; $CANDIDATE/lh model list; label-only rename; $CANDIDATE/lh run start; GET loopback Host /models; $CANDIDATE/lh stop",
+      "$CANDIDATE/lh model prepare exact local GGUF with published SHA-256; $CANDIDATE/lh model list; $CANDIDATE/lh model import; $CANDIDATE/lh model list; label-only rename; $CANDIDATE/lh run start; GET loopback Host /models; GET pinned llama.cpp /models; $CANDIDATE/lh stop",
     expected:
-      "The exact staged local file remains absent from Installed Model inventory until offline SHA-256 and GGUF verification complete, then one content-identified model appears atomically in both shipped CLI and loopback Host inventory without changing the source.",
+      "The exact staged local file remains absent from Installed Model inventory until offline SHA-256 and GGUF verification complete, then one content-identified model appears atomically in both shipped CLI and loopback Host inventory without changing the source, while the pinned llama.cpp router inventory stays empty.",
     observed: passed
-      ? `Exact source sha256:${options.modelSourceSha256} remained unchanged; content identity ${contentId}; architecture ${architecture}; ${parameterCount} parameters; training context ${trainingContext ?? "not declared"}; ${isRecord(tensorTypes) ? Object.keys(tensorTypes).length : 0} tensor layouts and ${templateHints.length} embedded template hints parsed; staged inventory was empty and one exact Installed Model became available through loopback Host inventory.`
-      : `${passedSteps} of 8 exact local acquisition checks passed; raw command output, local paths, and Host data were not retained.`,
+      ? `Exact source sha256:${options.modelSourceSha256} remained unchanged; content identity ${contentId}; architecture ${architecture}; ${parameterCount} parameters; training context ${trainingContext ?? "not declared"}; ${isRecord(tensorTypes) ? Object.keys(tensorTypes).length : 0} tensor layouts and ${templateHints.length} embedded template hints parsed; staged inventory was empty, one exact Installed Model became available through loopback Host inventory, and the sealed llama.cpp router inventory remained empty.`
+      : `${passedSteps} of 9 exact local acquisition checks passed; raw command output, local paths, and Host data were not retained.`,
     artifactLinks: options.artifactLinks,
     tester: "LocalHub exact local model acquisition driver",
     timestamp: dependencies.clock.now().toISOString(),

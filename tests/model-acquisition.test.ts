@@ -347,19 +347,30 @@ test("an interrupted copy remains explicitly Incomplete and resumes only the sam
     },
     { acquisitionId: () => "acquisition-interrupted" },
   );
+  const stagedPath = join(storagePath, ".localhub-staging", acquisition.id);
+  await mkdir(stagedPath, { recursive: true });
+  await writeFile(join(stagedPath, "resumable.gguf"), "");
   let interrupted = false;
+  let durableMidCopy: unknown = null;
 
   await expect(
     importLocalModel(storagePath, acquisition.id, {
       copyChunkBytes: 16,
-      afterCopyChunk: () => {
+      afterCopyChunk: async () => {
         if (!interrupted) {
           interrupted = true;
+          durableMidCopy = (await inspectModelAcquisitions(storagePath))[0];
           throw new Error("controlled interruption");
         }
       },
     }),
   ).rejects.toThrow("Local copy interrupted");
+  expect(durableMidCopy).toMatchObject({
+    id: acquisition.id,
+    status: "incomplete",
+    files: [{ receivedBytes: 16 }],
+    failure: null,
+  });
   expect(await inspectInstalledModels(storagePath)).toEqual([]);
   expect(await inspectModelAcquisitions(storagePath)).toMatchObject([
     {
@@ -377,6 +388,98 @@ test("an interrupted copy remains explicitly Incomplete and resumes only the sam
     status: "installed",
     installedModelId: installed.id,
   });
+});
+
+test("concurrent catalog mutations preserve both exact acquisition records", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const firstPath = join(root, "concurrent-first.gguf");
+  const secondPath = join(root, "concurrent-second.gguf");
+  await Promise.all([
+    writeFile(firstPath, gguf({ architecture: "qwen2", name: "First", contextLength: 2048 })),
+    writeFile(secondPath, gguf({ architecture: "qwen2", name: "Second", contextLength: 2048 })),
+  ]);
+  await prepareModelStorage(storagePath);
+  let arrivals = 0;
+  let release!: () => void;
+  const bothReady = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const availableBytes = async () => {
+    arrivals += 1;
+    if (arrivals === 2) release();
+    await bothReady;
+    return Number.MAX_SAFE_INTEGER;
+  };
+
+  await Promise.all([
+    prepareLocalModel(
+      {
+        displayName: "Concurrent First",
+        files: [{ path: firstPath, role: "model" }],
+        storagePath,
+      },
+      { acquisitionId: () => "acquisition-concurrent-first", availableBytes },
+    ),
+    prepareLocalModel(
+      {
+        displayName: "Concurrent Second",
+        files: [{ path: secondPath, role: "model" }],
+        storagePath,
+      },
+      { acquisitionId: () => "acquisition-concurrent-second", availableBytes },
+    ),
+  ]);
+
+  expect((await inspectModelAcquisitions(storagePath)).map((item) => item.id).sort()).toEqual([
+    "acquisition-concurrent-first",
+    "acquisition-concurrent-second",
+  ]);
+});
+
+test("concurrent shipped CLI processes serialize catalog mutations without lost records", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const gatePath = join(root, "prepare.gate");
+  await prepareModelStorage(storagePath);
+  const names = Array.from({ length: 6 }, (_, index) => `CLI Concurrent ${index + 1}`);
+  const sourcePaths = names.map((_, index) => join(root, `cli-concurrent-${index + 1}.gguf`));
+  await Promise.all(
+    sourcePaths.map((path, index) =>
+      writeFile(
+        path,
+        gguf({ architecture: "qwen2", name: names[index] ?? "CLI", contextLength: 2048 }),
+      ),
+    ),
+  );
+  const workers = sourcePaths.map((sourcePath, index) =>
+    Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "model-cli-prepare-worker.ts"),
+        storagePath,
+        sourcePath,
+        names[index] ?? "CLI",
+        gatePath,
+      ],
+      { stdout: "ignore", stderr: "pipe" },
+    ),
+  );
+  await Bun.sleep(50);
+  await writeFile(gatePath, "go", { mode: 0o600 });
+  const exits = await Promise.all(workers.map(async (worker) => await worker.exited));
+  if (exits.some((code) => code !== 0)) {
+    const failures = await Promise.all(
+      workers.map(async (worker) => await new Response(worker.stderr).text()),
+    );
+    throw new Error(`concurrent CLI worker failed: ${failures.join(" | ")}`);
+  }
+
+  expect(
+    (await inspectModelAcquisitions(storagePath))
+      .map((item) => item.displayName)
+      .sort((left, right) => left.localeCompare(right)),
+  ).toEqual([...names].sort((left, right) => left.localeCompare(right)));
 });
 
 test("a source changed during local copy is rejected after transfer and never installed", async () => {
@@ -808,6 +911,59 @@ test("a catalog-commit failure rolls promoted bytes back to uninstalled staging"
     status: "failed",
     installedModelId: null,
   });
+});
+
+test("restart reconciles an exact promotion after the importing process dies before catalog commit", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const sourcePath = join(root, "restart-promotion.gguf");
+  const markerPath = join(root, "promoted.marker");
+  await writeFile(
+    sourcePath,
+    gguf({ architecture: "qwen2", name: "Restart Promotion", contextLength: 2048 }),
+  );
+  await prepareModelStorage(storagePath);
+  const acquisition = await prepareLocalModel(
+    {
+      displayName: "Restart Promotion",
+      files: [{ path: sourcePath, role: "model" }],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-restart-promotion" },
+  );
+  const worker = Bun.spawn(
+    [
+      process.execPath,
+      join(import.meta.dir, "model-import-crash-worker.ts"),
+      storagePath,
+      acquisition.id,
+      markerPath,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const markerDeadline = Date.now() + 2_000;
+  while (!(await Bun.file(markerPath).exists()) && Date.now() < markerDeadline) {
+    await Bun.sleep(10);
+  }
+  if (!(await Bun.file(markerPath).exists())) {
+    worker.kill("SIGKILL");
+    throw new Error(
+      `promotion crash worker did not reach the marker: ${await new Response(worker.stderr).text()}`,
+    );
+  }
+  worker.kill("SIGKILL");
+  await worker.exited;
+
+  expect(await inspectInstalledModels(storagePath)).toMatchObject([
+    { displayName: "Restart Promotion", available: true },
+  ]);
+  expect(await inspectModelAcquisitions(storagePath)).toMatchObject([
+    {
+      id: acquisition.id,
+      status: "installed",
+      installedModelId: expect.stringMatching(/^[0-9a-f]{64}$/),
+    },
+  ]);
 });
 
 test("shipped Host commands separate exact preparation from import, inventory, and rename", async () => {

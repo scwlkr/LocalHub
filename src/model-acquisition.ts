@@ -11,9 +11,8 @@ import {
   rename,
   rm,
   statfs,
-  writeFile,
 } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const MODEL_STATE_SCHEMA = "localhub.model-state/v1";
 
@@ -29,13 +28,19 @@ export interface PrepareLocalModelOptions {
   files: LocalModelSelection[];
 }
 
-export interface ModelAcquisitionDependencies {
+export interface ModelMutationDependencies {
+  lockDeadlineMs?: number;
+  lockRetryMs?: number;
+  processAlive?: (pid: number) => boolean;
+}
+
+export interface ModelAcquisitionDependencies extends ModelMutationDependencies {
   acquisitionId?: () => string;
   availableBytes?: (storagePath: string) => Promise<number>;
   confirmReadable?: (path: string) => Promise<void>;
 }
 
-export interface ModelImportDependencies {
+export interface ModelImportDependencies extends ModelMutationDependencies {
   copyChunkBytes?: number;
   afterCopyChunk?: (copiedBytes: number) => Promise<void> | void;
   renamePath?: (oldPath: string, newPath: string) => Promise<void>;
@@ -104,6 +109,12 @@ interface ModelState {
   installedModels: InstalledModel[];
 }
 
+interface PromotionJournal {
+  schema: "localhub.model-promotion/v1";
+  acquisitionId: string;
+  installed: InstalledModel;
+}
+
 interface GgufInspection {
   architecture: string;
   name: string | null;
@@ -118,6 +129,9 @@ interface GgufInspection {
 }
 
 const MANAGED_DIRECTORIES = new Set([".localhub-catalog", ".localhub-models", ".localhub-staging"]);
+const PROMOTION_SCHEMA = "localhub.model-promotion/v1";
+const MUTATION_LOCK_NAME = "mutation.lock";
+const PROMOTION_JOURNAL_NAME = "promotion.json";
 const TENSOR_TYPES = new Map<number, { name: string; blockSize: number; typeSize: number }>([
   [0, { name: "F32", blockSize: 1, typeSize: 4 }],
   [1, { name: "F16", blockSize: 1, typeSize: 2 }],
@@ -241,37 +255,39 @@ export async function prepareLocalModel(
     );
   }
 
-  const state = await readModelState(storagePath);
-  const foldedName = options.displayName.trim().toLocaleLowerCase("en-US");
-  if (
-    state.installedModels.some(
-      (model) => model.displayName.toLocaleLowerCase("en-US") === foldedName,
-    )
-  ) {
-    throw new Error(
-      `Installed Model display name is already in use: ${options.displayName.trim()}`,
-    );
-  }
-  const acquisition: ModelAcquisition = {
-    id: (dependencies.acquisitionId ?? randomUUID)(),
-    status: "planned",
-    displayName: options.displayName.trim(),
-    storagePath,
-    requiredBytes,
-    availableBytes,
-    files,
-    installedModelId: null,
-    failure: null,
-  };
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(acquisition.id)) {
-    throw new Error("Model Acquisition identity is malformed.");
-  }
-  if (state.acquisitions.some((item) => item.id === acquisition.id)) {
-    throw new Error(`Model Acquisition identity already exists: ${acquisition.id}`);
-  }
-  state.acquisitions.push(acquisition);
-  await writeModelState(storagePath, state);
-  return acquisition;
+  return await withModelMutationLock(storagePath, dependencies, async () => {
+    const state = await readReconciledModelState(storagePath);
+    const foldedName = options.displayName.trim().toLocaleLowerCase("en-US");
+    if (
+      state.installedModels.some(
+        (model) => model.displayName.toLocaleLowerCase("en-US") === foldedName,
+      )
+    ) {
+      throw new Error(
+        `Installed Model display name is already in use: ${options.displayName.trim()}`,
+      );
+    }
+    const acquisition: ModelAcquisition = {
+      id: (dependencies.acquisitionId ?? randomUUID)(),
+      status: "planned",
+      displayName: options.displayName.trim(),
+      storagePath,
+      requiredBytes,
+      availableBytes,
+      files,
+      installedModelId: null,
+      failure: null,
+    };
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(acquisition.id)) {
+      throw new Error("Model Acquisition identity is malformed.");
+    }
+    if (state.acquisitions.some((item) => item.id === acquisition.id)) {
+      throw new Error(`Model Acquisition identity already exists: ${acquisition.id}`);
+    }
+    state.acquisitions.push(acquisition);
+    await writeModelState(storagePath, state);
+    return acquisition;
+  });
 }
 
 export async function importLocalModel(
@@ -281,7 +297,19 @@ export async function importLocalModel(
 ): Promise<InstalledModel> {
   const storagePath = resolve(storagePathValue);
   await assertModelStorage(storagePath);
-  const state = await readModelState(storagePath);
+  return await withModelMutationLock(
+    storagePath,
+    dependencies,
+    async () => await importLocalModelLocked(storagePath, acquisitionId, dependencies),
+  );
+}
+
+async function importLocalModelLocked(
+  storagePath: string,
+  acquisitionId: string,
+  dependencies: ModelImportDependencies,
+): Promise<InstalledModel> {
+  const state = await readReconciledModelState(storagePath);
   const acquisition = state.acquisitions.find((item) => item.id === acquisitionId);
   if (!acquisition) throw new Error(`Unknown Model Acquisition: ${acquisitionId}`);
   if (acquisition.status === "installed" && acquisition.installedModelId) {
@@ -304,6 +332,7 @@ export async function importLocalModel(
   }
   acquisition.failure = null;
   let promotedDirectory: string | null = null;
+  let promotionJournalWritten = false;
   let pendingInstalledId: string | null = null;
   try {
     const verifiable: Array<{ selected: PlannedModelFile; path: string; managed: boolean }> = [];
@@ -402,12 +431,6 @@ export async function importLocalModel(
 
     const finalDirectory = join(storagePath, ".localhub-models", id);
     const hasManagedFiles = orderedFiles.some((file) => file.managed);
-    if (hasManagedFiles) {
-      await (dependencies.renamePath ?? rename)(stagingPath, finalDirectory);
-      promotedDirectory = finalDirectory;
-    } else {
-      await rm(stagingPath, { recursive: true, force: true });
-    }
     const installedFiles = orderedFiles.map<InstalledModelFile>((file) => ({
       fileName: file.fileName,
       role: file.role,
@@ -434,12 +457,25 @@ export async function importLocalModel(
       files: installedFiles,
       acquiredAt: new Date().toISOString(),
     };
+    if (hasManagedFiles) {
+      await writePromotionJournal(storagePath, {
+        schema: PROMOTION_SCHEMA,
+        acquisitionId: acquisition.id,
+        installed,
+      });
+      promotionJournalWritten = true;
+      await (dependencies.renamePath ?? rename)(stagingPath, finalDirectory);
+      promotedDirectory = finalDirectory;
+    } else {
+      await rm(stagingPath, { recursive: true, force: true });
+    }
     state.installedModels.push(installed);
     pendingInstalledId = installed.id;
     acquisition.status = "installed";
     acquisition.installedModelId = installed.id;
     await dependencies.beforeCatalogCommit?.();
     await writeModelState(storagePath, state);
+    if (promotionJournalWritten) await removePromotionJournal(storagePath);
     return installed;
   } catch (error) {
     if (pendingInstalledId) {
@@ -457,6 +493,7 @@ export async function importLocalModel(
         );
       }
     }
+    if (promotionJournalWritten) await removePromotionJournal(storagePath);
     acquisition.status = error instanceof LocalCopyInterruptedError ? "incomplete" : "failed";
     acquisition.failure = errorMessage(error);
     await writeModelState(storagePath, state);
@@ -467,59 +504,65 @@ export async function importLocalModel(
 export async function inspectModelAcquisitions(
   storagePathValue: string,
 ): Promise<ModelAcquisition[]> {
-  return (await readModelState(resolve(storagePathValue))).acquisitions;
+  return (await readModelStateForInspection(resolve(storagePathValue))).acquisitions;
 }
 
 export async function renameInstalledModel(
   storagePathValue: string,
   modelId: string,
   displayNameValue: string,
+  dependencies: ModelMutationDependencies = {},
 ): Promise<InstalledModel> {
   const storagePath = resolve(storagePathValue);
   const displayName = displayNameValue.trim();
   if (!displayName) throw new Error("Installed Model display name must not be empty.");
-  const state = await readModelState(storagePath);
-  const model = state.installedModels.find((item) => item.id === modelId);
-  if (!model) throw new Error(`Unknown Installed Model content identity: ${modelId}`);
-  const foldedName = displayName.toLocaleLowerCase("en-US");
-  if (
-    state.installedModels.some(
-      (item) => item.id !== modelId && item.displayName.toLocaleLowerCase("en-US") === foldedName,
-    )
-  ) {
-    throw new Error(`Installed Model display name is already in use: ${displayName}`);
-  }
-  model.displayName = displayName;
-  await writeModelState(storagePath, state);
-  return { ...model, available: await installedFilesPresent(model.files) };
+  return await withModelMutationLock(storagePath, dependencies, async () => {
+    const state = await readReconciledModelState(storagePath);
+    const model = state.installedModels.find((item) => item.id === modelId);
+    if (!model) throw new Error(`Unknown Installed Model content identity: ${modelId}`);
+    const foldedName = displayName.toLocaleLowerCase("en-US");
+    if (
+      state.installedModels.some(
+        (item) => item.id !== modelId && item.displayName.toLocaleLowerCase("en-US") === foldedName,
+      )
+    ) {
+      throw new Error(`Installed Model display name is already in use: ${displayName}`);
+    }
+    model.displayName = displayName;
+    await writeModelState(storagePath, state);
+    return { ...model, available: await installedFilesPresent(model.files) };
+  });
 }
 
 export async function discardModelAcquisition(
   storagePathValue: string,
   acquisitionId: string,
+  dependencies: ModelMutationDependencies = {},
 ): Promise<ModelAcquisition> {
   const storagePath = resolve(storagePathValue);
-  const state = await readModelState(storagePath);
-  const acquisition = state.acquisitions.find((item) => item.id === acquisitionId);
-  if (!acquisition) throw new Error(`Unknown Model Acquisition: ${acquisitionId}`);
-  if (acquisition.status === "installed") {
-    throw new Error(`Installed Model Acquisition ${acquisitionId} cannot be discarded.`);
-  }
-  if (acquisition.status === "discarded") return acquisition;
-  await rm(join(storagePath, ".localhub-staging", acquisition.id), {
-    recursive: true,
-    force: true,
+  return await withModelMutationLock(storagePath, dependencies, async () => {
+    const state = await readReconciledModelState(storagePath);
+    const acquisition = state.acquisitions.find((item) => item.id === acquisitionId);
+    if (!acquisition) throw new Error(`Unknown Model Acquisition: ${acquisitionId}`);
+    if (acquisition.status === "installed") {
+      throw new Error(`Installed Model Acquisition ${acquisitionId} cannot be discarded.`);
+    }
+    if (acquisition.status === "discarded") return acquisition;
+    await rm(join(storagePath, ".localhub-staging", acquisition.id), {
+      recursive: true,
+      force: true,
+    });
+    acquisition.status = "discarded";
+    acquisition.failure = null;
+    for (const file of acquisition.files) file.receivedBytes = 0;
+    await writeModelState(storagePath, state);
+    return acquisition;
   });
-  acquisition.status = "discarded";
-  acquisition.failure = null;
-  for (const file of acquisition.files) file.receivedBytes = 0;
-  await writeModelState(storagePath, state);
-  return acquisition;
 }
 
 export async function inspectInstalledModels(storagePathValue: string): Promise<InstalledModel[]> {
   const storagePath = resolve(storagePathValue);
-  const state = await readModelState(storagePath);
+  const state = await readModelStateForInspection(storagePath);
   return await Promise.all(
     state.installedModels.map(async (model) => ({
       ...model,
@@ -542,7 +585,15 @@ async function assertModelStorage(storagePath: string): Promise<void> {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await mkdir(path, { mode: 0o700 });
+      try {
+        await mkdir(path, { mode: 0o700 });
+      } catch (mkdirError) {
+        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirError;
+        const entry = await lstat(path);
+        if (!entry.isDirectory() || entry.isSymbolicLink()) {
+          throw new Error(`Managed Model Storage path ${directory} is not a safe folder.`);
+        }
+      }
     }
   }
 }
@@ -622,6 +673,7 @@ async function copyLocalSource(options: {
   dependencies: ModelImportDependencies;
 }): Promise<void> {
   let existingBytes = 0;
+  let stagedFileExists = false;
   try {
     const existing = await lstat(options.stagedPath);
     if (!existing.isFile() || existing.isSymbolicLink()) {
@@ -629,6 +681,7 @@ async function copyLocalSource(options: {
         `Staged local model path is not a safe regular file: ${options.selected.fileName}`,
       );
     }
+    stagedFileExists = true;
     existingBytes = existing.size;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -648,12 +701,15 @@ async function copyLocalSource(options: {
     }
   }
   options.selected.receivedBytes = existingBytes;
+  options.acquisition.status = "incomplete";
+  options.acquisition.failure = null;
+  await writeModelState(options.storagePath, options.state);
   const chunkBytes = options.dependencies.copyChunkBytes ?? 8 * 1024 * 1024;
   if (!Number.isInteger(chunkBytes) || chunkBytes < 1) {
     throw new Error("Local copy chunk size must be a positive integer.");
   }
   const source = await open(options.sourcePath, "r");
-  const destination = await open(options.stagedPath, existingBytes === 0 ? "wx" : "r+");
+  const destination = await open(options.stagedPath, stagedFileExists ? "r+" : "wx");
   try {
     let position = existingBytes;
     while (position < options.selected.expectedSize) {
@@ -703,6 +759,231 @@ async function sha256Prefix(path: string, length: number): Promise<string> {
 class LocalCopyInterruptedError extends Error {
   constructor(cause: string) {
     super(`Local copy interrupted: ${cause}`);
+  }
+}
+
+async function withModelMutationLock<T>(
+  storagePath: string,
+  dependencies: ModelMutationDependencies,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  const lockPath = join(storagePath, ".localhub-catalog", MUTATION_LOCK_NAME);
+  const nonce = randomUUID();
+  const claimPath = `${lockPath}.claim.${process.pid}.${nonce}`;
+  const deadline = Date.now() + (dependencies.lockDeadlineMs ?? 300_000);
+  const retryMs = dependencies.lockRetryMs ?? 25;
+  if (!Number.isInteger(retryMs) || retryMs < 1) {
+    throw new Error("Model catalog lock retry must be a positive integer.");
+  }
+  await mkdir(claimPath, { mode: 0o700 });
+  try {
+    await writeDurableFile(
+      join(claimPath, "owner.json"),
+      `${JSON.stringify({ pid: process.pid, nonce, createdAt: new Date().toISOString() })}\n`,
+    );
+  } catch (error) {
+    await rm(claimPath, { recursive: true, force: true });
+    throw error;
+  }
+  let acquired = false;
+  try {
+    while (true) {
+      try {
+        await rename(claimPath, lockPath);
+        acquired = true;
+        break;
+      } catch {
+        if (!(await pathExists(lockPath))) continue;
+        if (await reclaimDeadMutationLock(lockPath, dependencies.processAlive)) continue;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            "Model catalog is locked by another live mutation; no catalog or model bytes were changed.",
+          );
+        }
+        await Bun.sleep(Math.min(retryMs, Math.max(1, deadline - Date.now())));
+      }
+    }
+    return await mutation();
+  } finally {
+    if (acquired) {
+      const releasedPath = `${lockPath}.released.${process.pid}.${nonce}`;
+      await rename(lockPath, releasedPath);
+      await rm(releasedPath, { recursive: true, force: true });
+    } else {
+      await rm(claimPath, { recursive: true, force: true });
+    }
+  }
+}
+
+async function reclaimDeadMutationLock(
+  lockPath: string,
+  processAlive: ((pid: number) => boolean) | undefined,
+): Promise<boolean> {
+  try {
+    const lockEntry = await lstat(lockPath);
+    if (lockEntry.isSymbolicLink() || !lockEntry.isDirectory()) {
+      throw new Error("Model catalog mutation lock is not a safe directory.");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+  let owner: unknown;
+  try {
+    owner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw new Error(`Model catalog mutation lock owner is unreadable: ${errorMessage(error)}`);
+  }
+  if (
+    isRecord(owner) &&
+    Number.isSafeInteger(owner.pid) &&
+    (owner.pid as number) > 1 &&
+    typeof owner.nonce === "string"
+  ) {
+    if ((processAlive ?? isProcessAlive)(owner.pid as number)) return false;
+  } else {
+    throw new Error("Model catalog mutation lock owner is malformed; recovery stopped.");
+  }
+  const stalePath = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+  try {
+    await rename(lockPath, stalePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
+  await rm(stalePath, { recursive: true, force: true });
+  return true;
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function readModelStateForInspection(storagePath: string): Promise<ModelState> {
+  if (!(await pathExists(promotionJournalPath(storagePath))))
+    return await readModelState(storagePath);
+  return await withModelMutationLock(
+    storagePath,
+    {},
+    async () => await readReconciledModelState(storagePath),
+  );
+}
+
+async function readReconciledModelState(storagePath: string): Promise<ModelState> {
+  const state = await readModelState(storagePath);
+  const journal = await readPromotionJournal(storagePath);
+  if (!journal) return state;
+  const acquisition = state.acquisitions.find((item) => item.id === journal.acquisitionId);
+  if (!acquisition) {
+    throw new Error("Model promotion journal names an unknown acquisition; recovery stopped.");
+  }
+  const finalDirectory = join(storagePath, ".localhub-models", journal.installed.id);
+  const stagingPath = join(storagePath, ".localhub-staging", journal.acquisitionId);
+  if (await safeManagedDirectoryExists(finalDirectory)) {
+    if (!(await installedFilesPresent(journal.installed.files))) {
+      throw new Error(
+        "Model promotion journal final bytes do not match the verified manifest; recovery stopped.",
+      );
+    }
+    const existing = state.installedModels.find((model) => model.id === journal.installed.id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(journal.installed)) {
+      throw new Error(
+        "Model promotion journal conflicts with the installed catalog; recovery stopped.",
+      );
+    }
+    if (
+      !existing &&
+      state.installedModels.some(
+        (model) =>
+          model.displayName.toLocaleLowerCase("en-US") ===
+          journal.installed.displayName.toLocaleLowerCase("en-US"),
+      )
+    ) {
+      throw new Error("Model promotion journal display name conflicts with the catalog.");
+    }
+    if (!existing) state.installedModels.push(journal.installed);
+    acquisition.status = "installed";
+    acquisition.installedModelId = journal.installed.id;
+    acquisition.failure = null;
+    await writeModelState(storagePath, state);
+    await removePromotionJournal(storagePath);
+    return state;
+  }
+  if (await safeManagedDirectoryExists(stagingPath)) {
+    await removePromotionJournal(storagePath);
+    return state;
+  }
+  throw new Error(
+    "Model promotion journal has neither exact staging nor final bytes; recovery stopped.",
+  );
+}
+
+async function readPromotionJournal(storagePath: string): Promise<PromotionJournal | null> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(promotionJournalPath(storagePath), "utf8"));
+    if (
+      !isRecord(parsed) ||
+      parsed.schema !== PROMOTION_SCHEMA ||
+      typeof parsed.acquisitionId !== "string" ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(parsed.acquisitionId) ||
+      !validInstalledModel(parsed.installed, storagePath)
+    ) {
+      throw new Error("Model promotion journal is incomplete or malformed.");
+    }
+    return parsed as unknown as PromotionJournal;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function writePromotionJournal(
+  storagePath: string,
+  journal: PromotionJournal,
+): Promise<void> {
+  const path = promotionJournalPath(storagePath);
+  if (await pathExists(path)) {
+    throw new Error("A prior Model promotion requires recovery before another promotion.");
+  }
+  await writeAtomicFile(path, `${JSON.stringify(journal, null, 2)}\n`);
+}
+
+async function removePromotionJournal(storagePath: string): Promise<void> {
+  await rm(promotionJournalPath(storagePath), { force: true });
+}
+
+function promotionJournalPath(storagePath: string): string {
+  return join(storagePath, ".localhub-catalog", PROMOTION_JOURNAL_NAME);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function safeManagedDirectoryExists(path: string): Promise<boolean> {
+  try {
+    const entry = await lstat(path);
+    if (entry.isSymbolicLink() || !entry.isDirectory()) {
+      throw new Error(
+        `Managed Model Storage recovery path is not a safe directory: ${basename(path)}`,
+      );
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
 }
 
@@ -889,10 +1170,40 @@ function digitString(value: unknown): value is string {
 
 async function writeModelState(storagePath: string, state: ModelState): Promise<void> {
   const path = join(storagePath, ".localhub-catalog", "models.json");
+  await writeAtomicFile(path, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+async function writeAtomicFile(path: string, contents: string): Promise<void> {
   const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-  await chmod(temporaryPath, 0o600);
-  await rename(temporaryPath, path);
+  try {
+    await writeDurableFile(temporaryPath, contents);
+    await rename(temporaryPath, path);
+    await syncDirectory(dirname(path));
+  } catch (error) {
+    await rm(temporaryPath, { force: true });
+    throw error;
+  }
+}
+
+async function writeDurableFile(path: string, contents: string): Promise<void> {
+  const handle = await open(path, "wx", 0o600);
+  try {
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await chmod(path, 0o600);
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 async function inspectGguf(path: string): Promise<GgufInspection> {

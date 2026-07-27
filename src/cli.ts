@@ -292,7 +292,7 @@ export async function main(
       return inspection.state === "failed" ? 1 : 0;
     }
     try {
-      const modelsDirectory =
+      const modelStorageDirectory =
         runCommand === "start"
           ? (dependencies.modelStoragePath ??
             (dependencies.startRun
@@ -316,7 +316,7 @@ export async function main(
               candidateRecordPath,
               executablePath,
               stateDirectory,
-              ...(modelsDirectory ? { modelsDirectory } : {}),
+              ...(modelStorageDirectory ? { modelStorageDirectory } : {}),
               ...(dependencies.inspectReleaseAsset
                 ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
                 : {}),
@@ -555,7 +555,9 @@ async function runSupervisorAgent(args: string[], dependencies: CliDependencies)
       stateDirectory: parsed.stateDirectory,
       startupDeadlineMs: 30_000,
       stopDeadlineMs: 10_000,
-      ...(parsed.modelsDirectory ? { modelsDirectory: parsed.modelsDirectory } : {}),
+      ...(parsed.modelStorageDirectory
+        ? { modelStorageDirectory: parsed.modelStorageDirectory }
+        : {}),
       ...(member ? { member } : {}),
     });
     return 0;
@@ -707,7 +709,7 @@ function parseSupervisorArgs(args: string[]): {
   stateDirectory: string;
   hostPort: number;
   llamaPort: number;
-  modelsDirectory?: string;
+  modelStorageDirectory?: string;
   member?: {
     interface: { name: string; address: string; netmask: string };
     bonjourName: string;
@@ -731,7 +733,7 @@ function parseSupervisorArgs(args: string[]): {
     optional.set(name, value);
   }
   const allowed = new Set([
-    "--models-dir",
+    "--model-storage",
     "--member-interface",
     "--member-address",
     "--member-netmask",
@@ -772,8 +774,8 @@ function parseSupervisorArgs(args: string[]): {
     stateDirectory: args[4] ?? "",
     hostPort,
     llamaPort,
-    ...(optional.get("--models-dir")
-      ? { modelsDirectory: optional.get("--models-dir") as string }
+    ...(optional.get("--model-storage")
+      ? { modelStorageDirectory: optional.get("--model-storage") as string }
       : {}),
     ...(memberPort === null
       ? {}

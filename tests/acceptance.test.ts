@@ -152,7 +152,12 @@ test("the model acquisition driver keeps staged bytes out of inventory and prove
     }),
     JSON.stringify([{ id: contentId, available: true }]),
     JSON.stringify({ id: contentId, displayName: "Acceptance Model Renamed" }),
-    JSON.stringify({ run: { host: { origin: "http://127.0.0.1:39281" } } }),
+    JSON.stringify({
+      run: {
+        host: { origin: "http://127.0.0.1:39281" },
+        llama: { origin: "http://127.0.0.1:39282" },
+      },
+    }),
     JSON.stringify({ status: "stopped" }),
   ];
   const candidate = verifiedCandidate();
@@ -178,7 +183,10 @@ test("the model acquisition driver keeps staged bytes out of inventory and prove
       clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
       storage: { read: async () => source },
       network: {
-        fetch: async () => Response.json({ installedModels: [{ id: contentId, available: true }] }),
+        fetch: async (request) =>
+          new URL(String(request)).port === "39282"
+            ? Response.json([])
+            : Response.json({ installedModels: [{ id: contentId, available: true }] }),
       },
       llamaCpp: { origin: "controlled" },
       responses: { origin: "controlled" },
@@ -207,6 +215,7 @@ test("the model acquisition driver keeps staged bytes out of inventory and prove
   ]);
   expect(record.gates[0]).toMatchObject({ journeyGateId: "LH-J2-002", status: "Passed" });
   expect(record.gates[0]?.observed).toContain(sourceSha256);
+  expect(record.gates[0]?.observed).toContain("sealed llama.cpp router inventory remained empty");
   expect(JSON.stringify(record)).not.toContain("/private/");
 });
 

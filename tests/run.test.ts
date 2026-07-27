@@ -108,7 +108,7 @@ test("the supervisor receives one explicit selected-interface Member boundary", 
     llamaPort: 39282,
     logPath: "/state/run.log",
     stateDirectory: "/state",
-    modelsDirectory: "/models",
+    modelStorageDirectory: "/models",
     member: {
       interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
       bonjourName: "localhub-test.local",
@@ -127,7 +127,7 @@ test("the supervisor receives one explicit selected-interface Member boundary", 
     "39281",
     "--llama-port",
     "39282",
-    "--models-dir",
+    "--model-storage",
     "/models",
     "--member-interface",
     "en0",
@@ -155,7 +155,7 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
       runStateDirectory: "/state",
       startRun: async (options) => {
         calls.push(
-          `start:${options.candidateRecordPath}:${options.stateDirectory}:${options.modelsDirectory}`,
+          `start:${options.candidateRecordPath}:${options.stateDirectory}:${options.modelStorageDirectory}`,
         );
         return state;
       },
@@ -514,7 +514,20 @@ macOSProcessTest(
     const root = await isolatedRoot();
     const stateDirectory = join(root, "state");
     const runtimeDirectory = join(root, "runtime");
-    await mkdir(runtimeDirectory, { recursive: true });
+    const modelStorageDirectory = join(root, "model-storage");
+    await Promise.all([
+      mkdir(runtimeDirectory, { recursive: true }),
+      mkdir(join(modelStorageDirectory, ".localhub-staging", "acquisition"), {
+        recursive: true,
+      }),
+    ]);
+    await Promise.all([
+      writeFile(join(modelStorageDirectory, "adoptable-unverified.gguf"), "unverified"),
+      writeFile(
+        join(modelStorageDirectory, ".localhub-staging", "acquisition", "partial.gguf"),
+        "partial",
+      ),
+    ]);
     const fakeLlama = join(runtimeDirectory, "llama-server");
     await writeFile(
       fakeLlama,
@@ -532,9 +545,9 @@ macOSProcessTest(
       bundle: bundle(fakeLlama),
       hostPort,
       llamaPort,
-      modelsDirectory: join(root, "model-storage"),
+      modelStorageDirectory,
       inspectModels: async (path) => {
-        expect(path).toBe(join(root, "model-storage"));
+        expect(path).toBe(modelStorageDirectory);
         return [
           {
             id: "a".repeat(64),
@@ -574,6 +587,9 @@ macOSProcessTest(
       },
     });
     expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
+    expect(
+      await fetch(`http://127.0.0.1:${llamaPort}/models`).then((response) => response.json()),
+    ).toEqual([]);
     expect(
       await fetch(`http://127.0.0.1:${hostPort}/models`).then((response) => response.json()),
     ).toMatchObject({
@@ -1305,7 +1321,7 @@ function fakeLlamaSource(
   options: { healthStatus?: number; preflightLockPath?: string; versionDelayMs?: number } = {},
 ): string {
   return `#!/usr/bin/env bun
-import { rm, writeFile } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 const args = Bun.argv.slice(2);
 const lockPath = ${JSON.stringify(options.preflightLockPath ?? null)};
 const versionDelayMs = ${options.versionDelayMs ?? 0};
@@ -1333,13 +1349,23 @@ if (args.includes("--list-devices")) {
   process.exit(0);
 }
 const value = (name) => args[args.indexOf(name) + 1];
+async function ggufs(path) {
+  const found = [];
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = path + "/" + entry.name;
+    if (entry.isDirectory()) found.push(...await ggufs(child));
+    else if (entry.name.toLowerCase().endsWith(".gguf")) found.push(child);
+  }
+  return found;
+}
 const server = Bun.serve({
   hostname: value("--host"),
   port: Number(value("--port")),
-  fetch(request) {
+  async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return Response.json({ status: "ok" }, { status: ${options.healthStatus ?? 200} });
     if (path === "/slots") return Response.json([]);
+    if (path === "/models") return Response.json(await ggufs(value("--models-dir")));
     return new Response("Not found", { status: 404 });
   },
 });
