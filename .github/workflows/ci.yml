@@ -58,6 +58,18 @@ jobs:
       - name: Smoke test standalone executable
         run: ${{ matrix.executable }} --help
 
+      - name: Acquire exact zero-cost llama.cpp runtime
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/vendor
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output dist/vendor/llama-b10107-bin-macos-arm64.tar.gz \
+            https://github.com/ggml-org/llama.cpp/releases/download/b10107/llama-b10107-bin-macos-arm64.tar.gz
+          actual="$(shasum -a 256 dist/vendor/llama-b10107-bin-macos-arm64.tar.gz | awk '{print $1}')"
+          expected="b9554ab4c9f6e91199f48387cb4ab27466fb1d724881f81463ef03f6370cfa32"
+          test "$actual" = "$expected"
+
       - name: Assemble exact macOS candidate
         if: runner.os == 'macOS'
         run: bun run candidate:assemble
@@ -73,11 +85,22 @@ jobs:
             dist/candidates/*/release-candidate.json \
             dist/evidence/t01-assembled-release.json
 
+      - name: Drive supervised LocalHub Run lifecycle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bun run candidate:lifecycle \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t02-supervised-run.json
+          dist/candidates/*/lh evidence validate \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t02-supervised-run.json
+
       - name: Retain candidate and sanitized evidence
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: t01-macos-arm64-${{ github.sha }}
+          name: localhub-macos-arm64-${{ github.sha }}
           path: |
             dist/candidates/
             dist/evidence/

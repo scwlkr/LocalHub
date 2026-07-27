@@ -19,7 +19,8 @@
     "build:windows-x64": "bun run scripts/build.ts bun-windows-x64",
     "build": "bun run scripts/build.ts",
     "candidate:assemble": "bun run scripts/assemble-candidate.ts",
-    "candidate:smoke": "bun run scripts/run-candidate-smoke.ts"
+    "candidate:smoke": "bun run scripts/run-candidate-smoke.ts",
+    "candidate:lifecycle": "bun run scripts/run-lifecycle-smoke.ts"
   },
   "dependencies": {
     "@opentui/core": "0.4.5"

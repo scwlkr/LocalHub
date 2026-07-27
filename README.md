@@ -30,8 +30,33 @@ Windows workstation.
 - Saves only non-secret preferences in the standard per-user configuration
   directory.
 
-LocalHub does not download models and has no daemon, service, account,
-telemetry, database, web UI, or hosted-provider manager.
+The legacy model-picker path does not download models and has no account,
+telemetry, database, web UI, or hosted-provider manager. The assembled v1
+candidate also contains one explicit, detached LocalHub Run lifecycle described
+below; it does not auto-start or replace the legacy commands.
+
+## Supervised LocalHub Run
+
+An assembled macOS-arm64 candidate includes the full official llama.cpp
+`b10107` runtime from release commit
+`c0bc8591e8815c63cb01dd3f051a8b0df02501c9`. Its manifest records the published
+archive checksum and every included regular file and symlink.
+
+`lh run start` explicitly starts a detached supervisor, an empty llama.cpp
+router on loopback, and a separate loopback Host health surface. It returns
+only after both are healthy. Closing that terminal does not stop the Run.
+Because model acquisition and Run Profiles are later v1 slices, this empty
+router uses an isolated LocalHub-owned model directory and reports no model or
+profile proof. Automatic model loading, automatic fitting, the llama.cpp Web
+UI, built-in agent/tools, and MCP proxy are disabled.
+
+Use `lh run status` to inspect the exact candidate, runtime binary checksum,
+architecture, Metal devices, process IDs, loopback listeners, health, and
+rendered launch controls. Use `lh stop` (or `lh run stop`) to reject new work,
+report active-work handling, and stop only LocalHub-owned processes and
+listeners. Stop never uninstalls LocalHub, deletes models, changes LM Studio,
+or touches source files. Failed health or identity checks do not try another
+runtime, port, model, or hidden restart.
 
 ## Requirements
 
@@ -200,6 +225,9 @@ placement matters.
 | `lh setup` | Guide Windows through LM Link or authenticated direct LAN |
 | `lh status` | Print system, route, server, auth, Codex, context, and model state |
 | `lh doctor` | Run setup checks and print concise fixes |
+| `lh run start` | Explicitly start the detached, supervised v1 Run |
+| `lh run status` | Inspect exact processes, listeners, runtime controls, and health |
+| `lh stop` or `lh run stop` | Reject new work and stop only LocalHub-owned processes |
 | `lh release identity <release-candidate.json>` | Verify the executing assembled asset and print its exact identity |
 | `lh evidence validate <release-candidate.json> <evidence.json>` | Reject stale, malformed, sensitive, or mismatched evidence |
 | `lh --help` | Show usage and keys |

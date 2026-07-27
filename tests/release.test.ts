@@ -8,6 +8,9 @@ import { EVIDENCE_SCHEMA } from "../src/evidence.ts";
 import {
   RELEASE_CANDIDATE_SCHEMA,
   RELEASE_MANIFEST_SCHEMA,
+  LLAMA_CPP_ARCHIVE_NAME,
+  LLAMA_CPP_ARCHIVE_SHA256,
+  LLAMA_CPP_ARCHIVE_SIZE,
   APPLE_NOTARIZED_TRUST_STATEMENT,
   assembleExpandCandidate,
   createExpandReleaseManifest,
@@ -201,6 +204,41 @@ test("the expand manifest declares every settled release pin without claiming fu
       digest: "sha256:6b5787eb43a997e1214f627480068396e434b0ba5b3761be382dcd3daa9e006a",
     },
   ]);
+});
+
+test("a lifecycle candidate marks the exact full pinned llama.cpp runtime included", () => {
+  const manifest = createExpandReleaseManifest({
+    asset: { path: "lh", size: 20, sha256: "1".repeat(64) },
+    commit: "a".repeat(40),
+    tag: null,
+    testedOsVersion: "27.0 (26A5388g)",
+    version: "0.1.1",
+    llamaRuntime: {
+      root: "runtime/llama.cpp",
+      archive: {
+        name: LLAMA_CPP_ARCHIVE_NAME,
+        size: LLAMA_CPP_ARCHIVE_SIZE,
+        sha256: LLAMA_CPP_ARCHIVE_SHA256,
+      },
+      files: [
+        {
+          kind: "file",
+          path: "llama-server",
+          size: 33_472,
+          sha256: "2".repeat(64),
+        },
+        { kind: "symlink", path: "libllama.dylib", target: "libllama.0.dylib" },
+      ],
+    },
+  });
+
+  expect(manifest.dependencies.find((item) => item.name === "llama.cpp")).toMatchObject({
+    version: "b10107",
+    included: true,
+    commit: "c0bc8591e8815c63cb01dd3f051a8b0df02501c9",
+    digest: `sha256:${LLAMA_CPP_ARCHIVE_SHA256}`,
+  });
+  expect(manifest.runtime?.llamaCpp.files).toHaveLength(2);
 });
 
 test("candidate assembly copies one immutable native asset and writes verifiable sidecars", async () => {
@@ -519,6 +557,7 @@ function releaseManifest(asset: { size: number; sha256: string }) {
         "Checksum verified and ad-hoc signed, but not notarized or reviewed by Apple. macOS may block first launch. Use System Settings → Privacy & Security → Open Anyway. Never disable Gatekeeper.",
     },
     rollbackTarget: "legacy-lh@0.1.1",
+    runtime: null,
     dependencies: [
       { name: "LocalHub", version: "0.1.1", included: true, commit: "a".repeat(40) },
       {
