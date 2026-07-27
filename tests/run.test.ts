@@ -276,7 +276,7 @@ test("hung llama health fails once with one repair and no hidden restart", async
       hostPort,
       llamaPort,
       stateDirectory,
-      startupDeadlineMs: 120,
+      startupDeadlineMs: 500,
       stopDeadlineMs: 500,
     }),
   ).rejects.toThrow("did not become healthy");

@@ -313,14 +313,18 @@ export function runBundleFromCandidate(
     throw new Error("The verified runtime inventory does not contain llama-server.");
   }
   const candidateDirectory = dirname(resolve(candidateRecordPath));
+  const candidateRelativeBinary = {
+    ...binary,
+    path: join(runtime.root, binary.path),
+  };
   return {
     candidateId: candidate.candidate.candidateId,
     commit: candidate.manifest.release.commit,
     executable: candidate.candidate.asset,
     llama: {
       archiveDigest: `sha256:${runtime.archive.sha256}`,
-      binary,
-      binaryPath: join(candidateDirectory, runtime.root, binary.path),
+      binary: candidateRelativeBinary,
+      binaryPath: join(candidateDirectory, candidateRelativeBinary.path),
       build: LLAMA_CPP_BUILD,
       commit: LLAMA_CPP_COMMIT,
     },
@@ -712,9 +716,16 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
   process.once("SIGINT", signalStop);
 
   try {
+    const startupDeadline = Date.now() + options.startupDeadlineMs;
     const [versionOutput, deviceOutput] = await Promise.all([
-      runFinite([options.bundle.llama.binaryPath, "--version"], 5_000),
-      runFinite([options.bundle.llama.binaryPath, "--list-devices"], 5_000),
+      runFinite(
+        [options.bundle.llama.binaryPath, "--version"],
+        remainingDeadline(startupDeadline, 5_000),
+      ),
+      runFinite(
+        [options.bundle.llama.binaryPath, "--list-devices"],
+        remainingDeadline(startupDeadline, 20_000),
+      ),
     ]);
     if (!/version:\s*10107\b/.test(versionOutput) || !versionOutput.includes("c0bc8591e")) {
       throw new Error("the included binary did not report pinned build b10107 at c0bc8591e");
@@ -755,7 +766,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       }
     });
 
-    const healthDeadline = Date.now() + options.startupDeadlineMs;
+    const healthDeadline = startupDeadline;
     let lastHealth = "no response";
     while (Date.now() < healthDeadline) {
       if (unexpectedExit) {
@@ -1183,6 +1194,10 @@ function assertPort(port: number, label: string): void {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new Error(`${label} port must be an exact unprivileged TCP port.`);
   }
+}
+
+function remainingDeadline(overallDeadline: number, maximumMs: number): number {
+  return Math.max(1, Math.min(maximumMs, overallDeadline - Date.now()));
 }
 
 function errorMessage(error: unknown): string {
