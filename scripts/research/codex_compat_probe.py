@@ -115,6 +115,7 @@ class FakeResponsesHandler(BaseHTTPRequestHandler):
             for item in body.get("input", [])
             if isinstance(item, dict) and item.get("type") == "function_call_output"
         ]
+        lowered_outputs = [output.lower() for output in function_outputs]
         self.state.requests.append(
             {
                 "path": self.path,
@@ -131,11 +132,22 @@ class FakeResponsesHandler(BaseHTTPRequestHandler):
                     for item in body.get("input", [])
                     if isinstance(item, dict)
                 ),
-                "function_output_reports_success": any("Exit code: 0" in output for output in function_outputs),
+                "function_output_excerpt": [output[:500] for output in function_outputs],
+                "function_output_reports_success": any(
+                    marker in output
+                    for output in lowered_outputs
+                    for marker in ("exit code: 0", "exited with code 0")
+                ),
                 "function_output_reports_denial": any(
                     marker in output.lower()
                     for output in function_outputs
-                    for marker in ("operation not permitted", "permission denied", "access is denied", "exit code: 1")
+                    for marker in (
+                        "operation not permitted",
+                        "permission denied",
+                        "access is denied",
+                        "exit code: 1",
+                        "exited with code 1",
+                    )
                 ),
             }
         )
@@ -355,12 +367,9 @@ def fake_suite(codex: str) -> dict[str, Any]:
         host.mkdir()
 
         if os.name == "nt":
-            member_command = "Set-Content -LiteralPath 'member-marker.txt' -NoNewline -Value 'member-only'"
-            outside_command = (
-                "Set-Content -LiteralPath "
-                + repr(str(outside / "outside-marker.txt"))
-                + " -NoNewline -Value 'forbidden'"
-            )
+            member_command = 'python -c "open(\'member-marker.txt\', \'w\').write(\'member-only\')"'
+            outside_path = (outside / "outside-marker.txt").as_posix()
+            outside_command = f'python -c "open(r\'{outside_path}\', \'w\').write(\'forbidden\')"'
         else:
             member_command = "printf 'member-only' > member-marker.txt"
             outside_command = "printf 'forbidden' > " + repr(str(outside / "outside-marker.txt"))
@@ -547,6 +556,20 @@ def main() -> int:
 
     result = fake_suite(args.codex) if args.command == "fake-suite" else real_smoke(args.codex, args.base_url)
     print(json.dumps(result, indent=2, sort_keys=True))
+    if args.command == "fake-suite":
+        assertions = [
+            result["config_and_auth_byte_identical"],
+            result["request_shape"].get("authorization_header") is False,
+            result["request_shape"].get("tool_types") == ["function"],
+            "shell_command" in result["request_shape"].get("tool_names", []),
+            all(result["member_tool_round_trip"].values()),
+            result["outside_workspace_denial"]["outside_marker_absent"],
+            result["outside_workspace_denial"]["function_output_returned"],
+            result["context_failure"]["client_exit_nonzero"],
+            result["context_failure"]["error_surfaced"],
+            all(result["cancellation"].values()),
+        ]
+        return 0 if all(assertions) else 1
     return 0
 
 

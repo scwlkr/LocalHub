@@ -115,7 +115,7 @@ jobs:
           $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-noble-wsl.rootfs.tar.gz"
           $install = Join-Path $env:RUNNER_TEMP "localhub-wsl2"
           Invoke-WebRequest `
-            -Uri "https://cloud-images.ubuntu.com/wsl/noble/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz" `
+            -Uri "https://cloud-images.ubuntu.com/wsl/releases/noble/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz" `
             -OutFile $rootfs
           wsl --import LocalHubProbe $install $rootfs --version 2
           wsl --list --verbose
@@ -142,6 +142,7 @@ jobs:
         run: |
           $workspace = (wsl -d LocalHubProbe -- wslpath -a $env:GITHUB_WORKSPACE).Trim()
           $codex = (wsl -d LocalHubProbe -- wslpath -a $env:CODEX_LINUX).Trim()
+          wsl -d LocalHubProbe -- chmod +x $codex
           wsl -d LocalHubProbe -- python3 `
             "$workspace/scripts/research/codex_compat_probe.py" `
             fake-suite `
