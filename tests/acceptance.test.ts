@@ -19,8 +19,11 @@ test("controlled external conditions drive only public commands and never become
       run: async (command) => {
         commands.push(command);
         const argument = command[1];
-        if (argument === "release") {
+        if (argument === "release" && command[2] === "identity") {
           return { code: 0, stdout: '{"candidateId":"verified"}', stderr: "" };
+        }
+        if (argument === "release" && command[2] === "notices") {
+          return { code: 0, stdout: "qrcode-generator 1.4.4\nMIT License", stderr: "" };
         }
         if (argument === "--help") {
           return { code: 0, stdout: "Usage: lh", stderr: "" };
@@ -61,6 +64,7 @@ test("controlled external conditions drive only public commands and never become
   expect(commands).toEqual([
     ["/candidate/lh", "release", "identity", "/candidate/release-candidate.json"],
     ["/candidate/lh", "--help"],
+    ["/candidate/lh", "release", "notices"],
     ["/candidate/lh", "--version"],
     ["/candidate/lh", "status"],
   ]);

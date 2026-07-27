@@ -203,7 +203,23 @@ test("the expand manifest declares every settled release pin without claiming fu
       included: false,
       digest: "sha256:6b5787eb43a997e1214f627480068396e434b0ba5b3761be382dcd3daa9e006a",
     },
+    {
+      name: "qrcode-generator",
+      version: "1.4.4",
+      included: true,
+      digest:
+        "sha512:HM7yY8O2ilqhmULxGMpcHSF1EhJJ9yBj8gvDEuZ6M+KGJ0YY2hKpnXvRD+hZPLrDVck3ExIGhmPtSdcjC+guuw==",
+    },
   ]);
+});
+
+test("the candidate exposes the exact bundled QR license notice", async () => {
+  const result = await captureOutput(() => main(["release", "notices"]));
+
+  expect(result.code).toBe(0);
+  expect(result.output.join("\n")).toContain("qrcode-generator 1.4.4");
+  expect(result.output.join("\n")).toContain("Copyright (c) 2009 Kazuhiko Arase");
+  expect(result.output.join("\n")).toContain("MIT License");
 });
 
 test("a lifecycle candidate marks the exact full pinned llama.cpp runtime included", () => {
@@ -579,6 +595,13 @@ function releaseManifest(asset: { size: number; sha256: string }) {
         version: "2026.5.31-7159b8aed",
         included: false,
         digest: "sha256:6b5787eb43a997e1214f627480068396e434b0ba5b3761be382dcd3daa9e006a",
+      },
+      {
+        name: "qrcode-generator",
+        version: "1.4.4",
+        included: true,
+        digest:
+          "sha512:HM7yY8O2ilqhmULxGMpcHSF1EhJJ9yBj8gvDEuZ6M+KGJ0YY2hKpnXvRD+hZPLrDVck3ExIGhmPtSdcjC+guuw==",
       },
     ],
   };

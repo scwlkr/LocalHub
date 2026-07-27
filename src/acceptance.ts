@@ -68,6 +68,13 @@ export async function runCandidateSmoke(
       passed: (result) => result.code === 0 && result.stdout.includes("Usage:"),
     },
     {
+      command: [options.executablePath, "release", "notices"],
+      passed: (result) =>
+        result.code === 0 &&
+        result.stdout.includes("qrcode-generator 1.4.4") &&
+        result.stdout.includes("MIT License"),
+    },
+    {
       command: [options.executablePath, "--version"],
       passed: (result) => result.code === 0 && result.stdout.trim() === version,
     },
@@ -95,10 +102,10 @@ export async function runCandidateSmoke(
     classification: "Mandatory",
     status: passed ? "Passed" : "Failed",
     action:
-      "$CANDIDATE/lh release identity; $CANDIDATE/lh --help; $CANDIDATE/lh --version; $CANDIDATE/lh status",
-    expected: `The exact candidate verifies its identity and preserves LocalHub ${version} help, version, and honest status behavior.`,
+      "$CANDIDATE/lh release identity; $CANDIDATE/lh --help; $CANDIDATE/lh release notices; $CANDIDATE/lh --version; $CANDIDATE/lh status",
+    expected: `The exact candidate verifies its identity, bundled license notice, and LocalHub ${version} help, version, and honest status behavior.`,
     observed: passed
-      ? "All four public candidate entrances matched the expected boundary."
+      ? "All five public candidate entrances matched the expected boundary."
       : `${passedSteps} of ${gates.length} public candidate entrances matched; captured output was not retained.`,
     artifactLinks: options.artifactLinks,
     tester: "LocalHub candidate acceptance driver",

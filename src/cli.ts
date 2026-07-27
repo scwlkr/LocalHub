@@ -5,12 +5,21 @@ import { buildCodexProcess, runCodex } from "./codex.ts";
 import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
 import { validateEvidenceRecord } from "./evidence.ts";
+import { runGuidedFirstRun } from "./guided-runway.ts";
+import {
+  createNativeGuidedDependencies,
+  defaultFirstRunStatePath,
+  defaultModelStoragePath,
+} from "./guided-native.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
+import { THIRD_PARTY_NOTICES } from "./notices.ts";
 import { verifyReleaseCandidate, type ReleaseAssetInspection } from "./release.ts";
 import {
   RunCommandError,
   defaultRunStateDirectory,
+  currentPrivateInterfaces,
   inspectLocalHubRun,
+  recheckMemberLink,
   runBundleFromCandidate,
   serveLocalHubRun,
   startLocalHubRun,
@@ -18,6 +27,7 @@ import {
   type LocalHubRunState,
   type RunInspection,
 } from "./run.ts";
+import { createMemberBinding } from "./member-gateway.ts";
 import { collectRuntime } from "./runtime.ts";
 import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
@@ -28,15 +38,18 @@ import { BUILD_COMMIT, VERSION } from "./version.ts";
 const HELP = `LocalHub ${VERSION}
 
 Usage:
-  lh                 Open the model picker
+  lh                 Enter Guided First Run from an assembled candidate
+  lh first-run       Resume Guided First Run explicitly
   lh setup           Configure Windows access with a guided wizard
   lh status          Show system, route, server, and model state
   lh doctor          Check setup and print concise fixes
   lh run start       Explicitly start the detached LocalHub Run
   lh run status      Show exact supervisor, runtime, listeners, and health
   lh stop            Reject new work and stop only LocalHub-owned processes
+  lh member recheck  Explicitly verify and republish after network change/wake
   lh release identity <release-candidate.json>
                      Verify and print the exact assembled candidate identity
+  lh release notices  Print bundled third-party license notices
   lh evidence validate <release-candidate.json> <evidence.json>
                      Reject malformed, stale, sensitive, or mismatched evidence
   lh --help          Show this help
@@ -78,6 +91,17 @@ export interface CliDependencies {
   inspectRun?: (stateDirectory: string) => Promise<RunInspection>;
   startRun?: typeof startLocalHubRun;
   stopRun?: typeof stopLocalHubRun;
+  firstRunStatePath?: string;
+  runFirstRun?: (options: FirstRunCommandOptions) => Promise<"ready" | "cancelled">;
+  recheckMember?: typeof recheckMemberLink;
+}
+
+export interface FirstRunCommandOptions {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  runStateDirectory: string;
+  statePath: string;
 }
 
 export async function main(
@@ -88,6 +112,10 @@ export async function main(
     return runSupervisorAgent(args, dependencies);
   }
   if (args[0] === "release") {
+    if (args.length === 2 && args[1] === "notices") {
+      console.log(THIRD_PARTY_NOTICES.trimEnd());
+      return 0;
+    }
     if (args.length === 2 && args[1] === "build-commit") {
       if (!/^[0-9a-f]{40}$/.test(BUILD_COMMIT)) {
         console.error("Build commit is unavailable from a source checkout.");
@@ -147,14 +175,64 @@ export async function main(
       return 1;
     }
   }
-  const runCommand = parseRunCommand(args);
-  if (runCommand) {
-    const executablePath = dependencies.executablePath ?? process.execPath;
+  const executablePath = dependencies.executablePath ?? process.execPath;
+  const candidateRecordPath =
+    dependencies.runCandidateRecordPath ?? join(dirname(executablePath), "release-candidate.json");
+  const assembledDefault = args.length === 0 && (await Bun.file(candidateRecordPath).exists());
+  if (assembledDefault || (args.length === 1 && args[0] === "first-run")) {
+    const interactive =
+      dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+    if (!interactive) {
+      console.error("Guided First Run needs an interactive Host terminal.");
+      return 2;
+    }
+    const runStateDirectory =
+      dependencies.runStateDirectory ?? defaultRunStateDirectory(dependencies.env ?? process.env);
+    const statePath =
+      dependencies.firstRunStatePath ?? defaultFirstRunStatePath(dependencies.env ?? process.env);
+    try {
+      const result = await (dependencies.runFirstRun ?? runFirstRunCommand)({
+        buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+        candidateRecordPath,
+        executablePath,
+        runStateDirectory,
+        statePath,
+      });
+      return result === "ready" || result === "cancelled" ? 0 : 1;
+    } catch (error) {
+      console.error(`Guided First Run failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+  if (args.length === 2 && args[0] === "member" && args[1] === "recheck") {
     const stateDirectory =
       dependencies.runStateDirectory ?? defaultRunStateDirectory(dependencies.env ?? process.env);
-    const candidateRecordPath =
-      dependencies.runCandidateRecordPath ??
-      join(dirname(executablePath), "release-candidate.json");
+    try {
+      const member = await (dependencies.recheckMember ?? recheckMemberLink)(stateDirectory);
+      console.log(
+        JSON.stringify(
+          {
+            action: "member-recheck",
+            member,
+            next:
+              member.health === "ready"
+                ? "Physical friendly and IPv4 verification passed."
+                : "Open both displayed links from one physical device, then run `lh member recheck` again.",
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    } catch (error) {
+      renderRunFailure(error);
+      return 1;
+    }
+  }
+  const runCommand = parseRunCommand(args);
+  if (runCommand) {
+    const stateDirectory =
+      dependencies.runStateDirectory ?? defaultRunStateDirectory(dependencies.env ?? process.env);
     if (runCommand === "status") {
       const inspection = await (dependencies.inspectRun ?? inspectLocalHubRun)(stateDirectory);
       console.log(JSON.stringify(inspection, null, 2));
@@ -349,6 +427,34 @@ export async function main(
   }
 }
 
+async function runFirstRunCommand(options: FirstRunCommandOptions): Promise<"ready" | "cancelled"> {
+  const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+    },
+  );
+  const bundle = runBundleFromCandidate(options.candidateRecordPath, candidate);
+  const result = await runGuidedFirstRun(
+    {
+      candidate,
+      defaultModelStorage: defaultModelStoragePath(),
+      statePath: options.statePath,
+    },
+    createNativeGuidedDependencies({
+      bundle,
+      run: {
+        buildCommit: options.buildCommit,
+        candidateRecordPath: options.candidateRecordPath,
+        executablePath: options.executablePath,
+        stateDirectory: options.runStateDirectory,
+      },
+    }),
+  );
+  return result.kind;
+}
+
 async function runSupervisorAgent(args: string[], dependencies: CliDependencies): Promise<number> {
   const parsed = parseSupervisorArgs(args);
   if (!parsed) {
@@ -363,6 +469,14 @@ async function runSupervisorAgent(args: string[], dependencies: CliDependencies)
         ? { inspectAsset: dependencies.inspectReleaseAsset }
         : {}),
     });
+    const member = parsed.member
+      ? await createMemberBinding({
+          selected: parsed.member.interface,
+          available: currentPrivateInterfaces(),
+          bonjourName: parsed.member.bonjourName,
+          port: parsed.member.port,
+        })
+      : undefined;
     await serveLocalHubRun({
       bundle: runBundleFromCandidate(parsed.candidateRecordPath, candidate),
       hostPort: parsed.hostPort,
@@ -370,6 +484,8 @@ async function runSupervisorAgent(args: string[], dependencies: CliDependencies)
       stateDirectory: parsed.stateDirectory,
       startupDeadlineMs: 30_000,
       stopDeadlineMs: 10_000,
+      ...(parsed.modelsDirectory ? { modelsDirectory: parsed.modelsDirectory } : {}),
+      ...(member ? { member } : {}),
     });
     return 0;
   } catch (error) {
@@ -393,9 +509,15 @@ function parseSupervisorArgs(args: string[]): {
   stateDirectory: string;
   hostPort: number;
   llamaPort: number;
+  modelsDirectory?: string;
+  member?: {
+    interface: { name: string; address: string; netmask: string };
+    bonjourName: string;
+    port: number;
+  };
 } | null {
   if (
-    args.length !== 9 ||
+    args.length < 9 ||
     args[1] !== "--candidate" ||
     args[3] !== "--state-dir" ||
     args[5] !== "--host-port" ||
@@ -403,6 +525,22 @@ function parseSupervisorArgs(args: string[]): {
   ) {
     return null;
   }
+  const optional = new Map<string, string>();
+  for (let index = 9; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (!name?.startsWith("--") || value === undefined || optional.has(name)) return null;
+    optional.set(name, value);
+  }
+  const allowed = new Set([
+    "--models-dir",
+    "--member-interface",
+    "--member-address",
+    "--member-netmask",
+    "--bonjour-name",
+    "--member-port",
+  ]);
+  if ([...optional.keys()].some((name) => !allowed.has(name))) return null;
   const hostPort = Number(args[6]);
   const llamaPort = Number(args[8]);
   if (
@@ -416,11 +554,42 @@ function parseSupervisorArgs(args: string[]): {
   ) {
     return null;
   }
+  const memberValues = [
+    optional.get("--member-interface"),
+    optional.get("--member-address"),
+    optional.get("--member-netmask"),
+    optional.get("--bonjour-name"),
+    optional.get("--member-port"),
+  ];
+  if (memberValues.some(Boolean) && memberValues.some((value) => value === undefined)) return null;
+  const memberPort = memberValues[4] === undefined ? null : Number(memberValues[4]);
+  if (
+    memberPort !== null &&
+    (!Number.isInteger(memberPort) || memberPort < 1024 || memberPort > 65535)
+  ) {
+    return null;
+  }
   return {
     candidateRecordPath: args[2] ?? "",
     stateDirectory: args[4] ?? "",
     hostPort,
     llamaPort,
+    ...(optional.get("--models-dir")
+      ? { modelsDirectory: optional.get("--models-dir") as string }
+      : {}),
+    ...(memberPort === null
+      ? {}
+      : {
+          member: {
+            interface: {
+              name: memberValues[0] as string,
+              address: memberValues[1] as string,
+              netmask: memberValues[2] as string,
+            },
+            bonjourName: memberValues[3] as string,
+            port: memberPort,
+          },
+        }),
   };
 }
 

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type ChildProcess, spawn } from "node:child_process";
 import {
@@ -13,6 +13,16 @@ import {
   type ReleaseAssetInspection,
   type VerifiedReleaseCandidate,
 } from "./release.ts";
+import {
+  createMemberBinding,
+  createMemberGatewayHandler,
+  isEligibleLanInterface,
+  reconcileMemberBinding,
+  renderHostDashboard,
+  renderStylesheet,
+  type MemberBinding,
+  type PrivateInterface,
+} from "./member-gateway.ts";
 
 export const RUN_STATE_SCHEMA = "localhub.run-state/v1";
 export const DEFAULT_HOST_PORT = 39281;
@@ -70,6 +80,17 @@ export interface LocalHubRunState {
     webUi: false;
     mcpProxy: false;
   };
+  member?: {
+    interface: PrivateInterface;
+    bonjourName: string;
+    port: number;
+    friendlyUrl: string;
+    ipv4Url: string;
+    listener: string;
+    health: "ready" | "closed" | "recheck-required";
+    bonjourPublished: boolean;
+    failure: RunFailure | null;
+  } | null;
   activeWork: number;
   failure: RunFailure | null;
   stop: { activeWork: number; forcedProcesses: string[] } | null;
@@ -100,6 +121,23 @@ export interface SupervisorLaunch {
   cwd: string;
 }
 
+export interface RunMemberConfig {
+  interface: PrivateInterface;
+  bonjourName: string;
+  port: number;
+}
+
+export interface BonjourPublication {
+  exited: Promise<Error | null>;
+  stop(): Promise<void>;
+}
+
+export interface BonjourProcessDependencies {
+  spawn?: typeof spawn;
+  sleep?: (milliseconds: number) => Promise<void>;
+  waitForExit?: (child: ChildProcess, deadlineMs: number) => Promise<boolean>;
+}
+
 export interface ServeRunOptions {
   bundle: RunBundle;
   hostPort: number;
@@ -107,6 +145,15 @@ export interface ServeRunOptions {
   stateDirectory: string;
   startupDeadlineMs: number;
   stopDeadlineMs: number;
+  modelsDirectory?: string;
+  member?: MemberBinding;
+  currentInterfaces?: () => PrivateInterface[];
+  memberCheckIntervalMs?: number;
+  memberWakeGapMs?: number;
+  now?: () => number;
+  memberPeerAddress?: (request: Request) => string | null;
+  beforeMemberVisit?: (route: "friendly" | "ipv4") => Promise<void>;
+  publishBonjour?: (binding: MemberBinding) => Promise<BonjourPublication>;
 }
 
 interface InspectDependencies {
@@ -131,6 +178,8 @@ export interface RunCommandOptions {
   startupDeadlineMs?: number;
   stopDeadlineMs?: number;
   inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+  modelsDirectory?: string;
+  member?: RunMemberConfig;
 }
 
 export class RunCommandError extends Error {
@@ -189,25 +238,45 @@ export function buildSupervisorLaunch(options: {
   llamaPort: number;
   logPath: string;
   stateDirectory: string;
+  modelsDirectory?: string;
+  member?: RunMemberConfig;
 }): SupervisorLaunch {
   assertPort(options.hostPort, "Host control");
   assertPort(options.llamaPort, "llama.cpp");
   if (options.hostPort === options.llamaPort) {
     throw new Error("Host control and llama.cpp must use distinct loopback ports.");
   }
+  const command = [
+    options.executablePath,
+    "__run-agent",
+    "--candidate",
+    options.candidateRecordPath,
+    "--state-dir",
+    options.stateDirectory,
+    "--host-port",
+    String(options.hostPort),
+    "--llama-port",
+    String(options.llamaPort),
+  ];
+  if (options.modelsDirectory) {
+    command.push("--models-dir", options.modelsDirectory);
+  }
+  if (options.member) {
+    command.push(
+      "--member-interface",
+      options.member.interface.name,
+      "--member-address",
+      options.member.interface.address,
+      "--member-netmask",
+      options.member.interface.netmask,
+      "--bonjour-name",
+      options.member.bonjourName,
+      "--member-port",
+      String(options.member.port),
+    );
+  }
   return {
-    command: [
-      options.executablePath,
-      "__run-agent",
-      "--candidate",
-      options.candidateRecordPath,
-      "--state-dir",
-      options.stateDirectory,
-      "--host-port",
-      String(options.hostPort),
-      "--llama-port",
-      String(options.llamaPort),
-    ],
+    command,
     detached: true,
     stdio: ["ignore", options.logPath, options.logPath],
     cwd: options.stateDirectory,
@@ -346,6 +415,19 @@ export async function startLocalHubRun(options: RunCommandOptions): Promise<Loca
   ) {
     const inspection = await inspectLocalHubRun(options.stateDirectory);
     if (inspection.state === "running") {
+      if (
+        options.member &&
+        inspection.identityProven &&
+        inspection.run &&
+        inspection.run.commit === options.buildCommit &&
+        sameMemberConfig(inspection.run.member, options.member)
+      ) {
+        if (inspection.run.member?.health === "ready") return inspection.run;
+        if (inspection.run.member?.health === "recheck-required") {
+          await recheckMemberLink(options.stateDirectory);
+          return await resumeExistingMemberRun(options, inspection.run.runId);
+        }
+      }
       throw new RunCommandError(
         runFailure(
           `LocalHub Run ${prior.runId} is already active.`,
@@ -424,6 +506,8 @@ export async function startLocalHubRun(options: RunCommandOptions): Promise<Loca
     llamaPort,
     logPath,
     stateDirectory: options.stateDirectory,
+    ...(options.modelsDirectory ? { modelsDirectory: options.modelsDirectory } : {}),
+    ...(options.member ? { member: options.member } : {}),
   });
   const logDescriptor = openSync(logPath, "a", 0o600);
   let supervisor: ChildProcess;
@@ -466,18 +550,95 @@ export async function startLocalHubRun(options: RunCommandOptions): Promise<Loca
     }
     if (state?.status === "running") {
       const inspection = await inspectLocalHubRun(options.stateDirectory);
-      if (inspection.state === "running" && inspection.run) return inspection.run;
+      if (
+        inspection.state === "running" &&
+        inspection.run &&
+        (!options.member || inspection.run.member?.health === "ready")
+      ) {
+        return inspection.run;
+      }
+      if (inspection.state === "running" && inspection.run && options.member) {
+        await Bun.sleep(25);
+        continue;
+      }
+      throw new RunCommandError(inspection.failure as RunFailure);
+    }
+    await Bun.sleep(25);
+  }
+  const timedOut = await readRunState(options.stateDirectory);
+  if (
+    options.member &&
+    timedOut?.status === "running" &&
+    timedOut.member?.health === "recheck-required" &&
+    sameMemberConfig(timedOut.member, options.member)
+  ) {
+    throw new RunCommandError(
+      runFailure(
+        `LocalHub Run ${timedOut.runId} remains active but physical Member verification did not complete before the finite deadline.`,
+        "No duplicate Run was started; Host and llama.cpp remain on their exact listeners while Member inference remains unavailable.",
+        "The loopback Host dashboard and physical-verification Member links remain available.",
+        "Open both exact links from one physical device on the selected trusted LAN.",
+        "Type `Start LocalHub` again to resume the exact Run readiness wait without starting another Run.",
+      ),
+    );
+  }
+  throw new RunCommandError(
+    runFailure(
+      "The LocalHub supervisor did not report Host, llama.cpp, and required physical Member readiness before the finite deadline.",
+      "No success was claimed and no alternate port, runtime, model, or profile was tried.",
+      "Models, LM Studio, configuration, and source files remain untouched.",
+      "Inspect supervisor.log and the two exact loopback ports, then run `lh stop`.",
+      "Run `lh run status` again.",
+    ),
+  );
+}
+
+async function resumeExistingMemberRun(
+  options: RunCommandOptions,
+  runId: string,
+): Promise<LocalHubRunState> {
+  const deadline = Date.now() + (options.startupDeadlineMs ?? 30_000);
+  while (Date.now() < deadline) {
+    const state = await readRunState(options.stateDirectory);
+    if (!state || state.runId !== runId) {
+      throw new RunCommandError(
+        runFailure(
+          "The exact active LocalHub Run changed while Member readiness was resuming.",
+          "No duplicate Run was started and no process was signalled.",
+          "The stopped or replacement Run state remains available for inspection.",
+          "Inspect the exact Run identity before taking another lifecycle action.",
+          "Run `lh run status` again.",
+        ),
+      );
+    }
+    if (state.status === "failed" || state.status === "stopped") {
+      throw new RunCommandError(
+        state.failure ??
+          runFailure(
+            "The exact Run stopped before Member readiness passed.",
+            "No duplicate Run was started.",
+            "Recorded Run state remains available.",
+            "Resolve the recorded stop or failure before an explicit restart.",
+            "Run `lh run status` again.",
+          ),
+      );
+    }
+    if (state.status === "running" && state.member?.health === "ready") {
+      const inspection = await inspectLocalHubRun(options.stateDirectory);
+      if (inspection.state === "running" && inspection.identityProven && inspection.run) {
+        return inspection.run;
+      }
       throw new RunCommandError(inspection.failure as RunFailure);
     }
     await Bun.sleep(25);
   }
   throw new RunCommandError(
     runFailure(
-      "The LocalHub supervisor did not report both Host and llama.cpp health before the finite deadline.",
-      "No success was claimed and no alternate port, runtime, model, or profile was tried.",
-      "Models, LM Studio, configuration, and source files remain untouched.",
-      "Inspect supervisor.log and the two exact loopback ports, then run `lh stop`.",
-      "Run `lh run status` again.",
+      `LocalHub Run ${runId} remains active but physical Member verification is still pending.`,
+      "No duplicate Run was started and Member inference remains unavailable.",
+      "The loopback Host dashboard and verification links remain available.",
+      "Open both exact links from one physical device on the selected trusted LAN.",
+      "Type `Start LocalHub` again to resume the exact Run readiness wait.",
     ),
   );
 }
@@ -515,6 +676,7 @@ export async function stopLocalHubRun(options: {
       acceptingWork: false,
       host: { ...state.host, health: "closed" },
       llama: { ...state.llama, health: "closed" },
+      member: state.member ? { ...state.member, health: "closed", bonjourPublished: false } : null,
       stop: { activeWork: state.activeWork, forcedProcesses: [] },
       updatedAt: new Date().toISOString(),
     };
@@ -550,7 +712,10 @@ export async function stopLocalHubRun(options: {
     ) {
       if (
         (await listenerResponds(current.host.origin)) ||
-        (await listenerResponds(current.llama.origin))
+        (await listenerResponds(current.llama.origin)) ||
+        (current.member !== undefined &&
+          current.member !== null &&
+          (await listenerResponds(current.member.ipv4Url)))
       ) {
         await Bun.sleep(25);
         continue;
@@ -573,6 +738,53 @@ export async function stopLocalHubRun(options: {
   );
 }
 
+export async function recheckMemberLink(
+  stateDirectory: string,
+): Promise<NonNullable<LocalHubRunState["member"]>> {
+  const inspection = await inspectLocalHubRun(stateDirectory);
+  if (
+    inspection.state !== "running" ||
+    !inspection.identityProven ||
+    !inspection.run ||
+    !inspection.run.member
+  ) {
+    throw new RunCommandError(
+      runFailure(
+        "The exact active LocalHub Run and Member boundary could not be proven.",
+        "No listener was opened, closed, or rebound.",
+        "The loopback Host status remains available.",
+        "Restore the exact Run identity before requesting a Member recheck.",
+        "Run `lh run status`, then `lh member recheck`.",
+      ),
+    );
+  }
+  const response = await finiteFetch(
+    fetch,
+    `${inspection.run.host.origin}/member/recheck`,
+    {
+      method: "POST",
+      headers: { "x-localhub-run-id": inspection.run.runId },
+    },
+    5_000,
+  );
+  if (!response.ok) {
+    throw new RunCommandError(
+      runFailure(
+        `Member recheck failed with HTTP ${response.status}.`,
+        "The old Member Link remains closed and no alternate interface was selected.",
+        "The exact Run and loopback Host dashboard remain available.",
+        "Confirm the intended private interface and resolve the reported network cause.",
+        "Run `lh member recheck` again.",
+      ),
+    );
+  }
+  const body = (await response.json()) as { member?: LocalHubRunState["member"] };
+  if (body.member?.health !== "ready" && body.member?.health !== "recheck-required") {
+    throw new Error("Member recheck returned no exact verification boundary.");
+  }
+  return body.member;
+}
+
 export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> {
   assertPort(options.hostPort, "Host control");
   assertPort(options.llamaPort, "llama.cpp");
@@ -581,7 +793,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
   }
   await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
   await chmod(options.stateDirectory, 0o700);
-  const modelsDirectory = join(options.stateDirectory, "empty-models");
+  const modelsDirectory = options.modelsDirectory ?? join(options.stateDirectory, "empty-models");
   await mkdir(modelsDirectory, { recursive: true, mode: 0o700 });
   const logPath = join(options.stateDirectory, "llama-server.log");
   const runId = randomUUID();
@@ -626,6 +838,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       webUi: false,
       mcpProxy: false,
     },
+    member: options.member ? memberState(options.member, "closed", false, null) : null,
     activeWork: 0,
     failure: null,
     stop: null,
@@ -635,15 +848,30 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
 
   let llama: ChildProcess | null = null;
   let host: ReturnType<typeof Bun.serve> | null = null;
+  let member: ReturnType<typeof Bun.serve> | null = null;
+  let memberBinding = options.member ?? null;
+  let bonjour: BonjourPublication | null = null;
+  let memberMonitor: ReturnType<typeof setInterval> | null = null;
+  let memberWithdrawn = false;
+  const memberCheckIntervalMs = options.memberCheckIntervalMs ?? 1_000;
+  const memberClock = options.now ?? Date.now;
+  const memberWakeGapMs = options.memberWakeGapMs ?? Math.max(memberCheckIntervalMs * 3, 3_000);
+  let lastMemberCheckAt = memberClock();
   let stopping = false;
   let lifecycleResolve!: () => void;
   const lifecycle = new Promise<void>((resolve) => {
     lifecycleResolve = resolve;
   });
 
+  let stateWrite = Promise.resolve();
   const setState = async (next: LocalHubRunState): Promise<void> => {
     state = { ...next, updatedAt: new Date().toISOString() };
-    await writeRunState(options.stateDirectory, state);
+    const snapshot = state;
+    const commit = stateWrite.then(async () => {
+      await writeRunState(options.stateDirectory, snapshot);
+    });
+    stateWrite = commit.catch(() => undefined);
+    await commit;
   };
 
   let crashTask: Promise<void> | null = null;
@@ -673,6 +901,18 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     if (crashTask) await crashTask;
     const forcedProcesses: string[] = [];
     await setState({ ...state, status: "stopping", acceptingWork: false, activeWork: 0 });
+    if (memberMonitor) {
+      clearInterval(memberMonitor);
+      memberMonitor = null;
+    }
+    if (member) {
+      await member.stop(true);
+      member = null;
+    }
+    if (bonjour) {
+      await bonjour.stop();
+      bonjour = null;
+    }
     if (llama && llama.exitCode === null && llama.signalCode === null) {
       llama.kill("SIGTERM");
       if (!(await waitForExit(llama, options.stopDeadlineMs))) {
@@ -693,6 +933,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       acceptingWork: false,
       host: { ...state.host, health: "closed" },
       llama: { ...state.llama, health: "closed" },
+      member: state.member ? { ...state.member, health: "closed", bonjourPublished: false } : null,
       stop: { activeWork: 0, forcedProcesses },
     });
     lifecycleResolve();
@@ -788,16 +1029,228 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       await verifyListenerOwner(options.llamaPort, llama.pid);
     }
 
+    const withdrawMember = async (failure: RunFailure): Promise<void> => {
+      if (memberWithdrawn) return;
+      memberWithdrawn = true;
+      const closure = Promise.all([
+        member ? member.stop(true) : Promise.resolve(),
+        bonjour ? bonjour.stop() : Promise.resolve(),
+      ]);
+      member = null;
+      bonjour = null;
+      memberBinding = null;
+      if (state.member) {
+        await setState({
+          ...state,
+          member: {
+            ...state.member,
+            health: "recheck-required",
+            bonjourPublished: false,
+            failure,
+          },
+        });
+      }
+      await closure;
+    };
+
+    const startMemberService = async (
+      binding: MemberBinding,
+      requirePhysicalVerification: boolean,
+    ): Promise<void> => {
+      const reconciliation = reconcileMemberBinding(
+        binding,
+        (options.currentInterfaces ?? currentPrivateInterfaces)(),
+      );
+      if (reconciliation.status === "withdrawn") throw new Error(reconciliation.failure.cause);
+      const visited = { friendly: false, ipv4: false };
+      let verificationCommitted = false;
+      let verificationOpen = false;
+      let server: ReturnType<typeof Bun.serve> | null = null;
+      let currentPublication: BonjourPublication | null = null;
+      const completePhysicalVerification = (): void => {
+        if (
+          !requirePhysicalVerification ||
+          !verificationOpen ||
+          verificationCommitted ||
+          memberWithdrawn ||
+          stopping ||
+          member !== server ||
+          currentPublication === null ||
+          bonjour !== currentPublication ||
+          !visited.friendly ||
+          !visited.ipv4
+        ) {
+          return;
+        }
+        verificationCommitted = true;
+        void setState({
+          ...state,
+          member: memberState(binding, "ready", true, null),
+        }).catch((error) => {
+          crashRecordError = error instanceof Error ? error : new Error(String(error));
+          lifecycleResolve();
+        });
+      };
+      const handler = createMemberGatewayHandler(
+        binding,
+        (request) =>
+          options.memberPeerAddress
+            ? options.memberPeerAddress(request)
+            : (server?.requestIP(request)?.address ?? null),
+        async (route, peer) => {
+          await options.beforeMemberVisit?.(route);
+          const normalized = peer.startsWith("::ffff:") ? peer.slice(7) : peer;
+          if (normalized !== binding.interface.address) {
+            visited[route] = true;
+            completePhysicalVerification();
+          }
+        },
+        () => (state.member?.health === "ready" ? "ready" : "verification-required"),
+      );
+      server = Bun.serve({
+        hostname: binding.interface.address,
+        port: binding.port,
+        fetch: handler,
+      });
+      let publication: BonjourPublication;
+      try {
+        publication = await (options.publishBonjour ?? publishBonjourService)(binding);
+      } catch (error) {
+        await server.stop(true);
+        throw error;
+      }
+      member = server;
+      memberBinding = binding;
+      bonjour = publication;
+      currentPublication = publication;
+      memberWithdrawn = false;
+      void publication.exited.then((failure) => {
+        if (!failure || stopping || bonjour !== publication) return;
+        void withdrawMember(
+          runFailure(
+            `Bonjour publication failed after Member start: ${failure.message}`,
+            "The Member listener and stale publication are closed; no alternate name, address, or interface was selected.",
+            "The loopback Host dashboard and exact Run remain available.",
+            "Restore the local mDNS publication boundary without renaming or substituting the Host.",
+            "Run `lh member recheck` and open both displayed links again.",
+          ),
+        ).catch((error) => {
+          crashRecordError = error instanceof Error ? error : new Error(String(error));
+          lifecycleResolve();
+        });
+      });
+      await setState({
+        ...state,
+        member: memberState(
+          binding,
+          requirePhysicalVerification ? "recheck-required" : "ready",
+          true,
+          requirePhysicalVerification
+            ? runFailure(
+                "A physical Member must reopen both the exact friendly and IPv4 links after start, wake, or rebind.",
+                "The new selected-interface listener exposes only the inert readiness page; Member inference remains unavailable.",
+                "The loopback Host dashboard and exact Run remain available.",
+                "Open both displayed links from one physical device on the selected trusted LAN.",
+                "Run `lh member recheck` again after both links open.",
+              )
+            : null,
+        ),
+      });
+      lastMemberCheckAt = memberClock();
+      verificationOpen = true;
+      completePhysicalVerification();
+    };
+
     host = Bun.serve({
       hostname: "127.0.0.1",
       port: options.hostPort,
-      fetch(request) {
+      async fetch(request) {
         const url = new URL(request.url);
+        const expectedHost = new URL(state.host.origin).host;
+        const peer = host?.requestIP(request)?.address ?? null;
+        if (request.headers.get("host")?.toLowerCase() !== expectedHost.toLowerCase()) {
+          return Response.json({ error: "Host control name did not match." }, { status: 421 });
+        }
+        if (peer !== "127.0.0.1" && peer !== "::1" && peer !== "::ffff:127.0.0.1") {
+          return Response.json({ error: "Host control is loopback-only." }, { status: 403 });
+        }
+        if (request.method === "GET" && url.pathname === "/") {
+          return new Response(
+            renderHostDashboard(state.member?.health !== "closed" ? memberBinding : null, state),
+            {
+              headers: {
+                "cache-control": "no-store",
+                "content-security-policy":
+                  "default-src 'self'; img-src 'self' data:; style-src 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
+                "content-type": "text/html; charset=utf-8",
+                "x-content-type-options": "nosniff",
+                "x-frame-options": "DENY",
+              },
+            },
+          );
+        }
+        if (request.method === "GET" && url.pathname === "/localhub.css") {
+          return new Response(renderStylesheet(), {
+            headers: {
+              "cache-control": "no-store",
+              "content-type": "text/css; charset=utf-8",
+              "x-content-type-options": "nosniff",
+            },
+          });
+        }
         if (request.method === "GET" && url.pathname === "/health") {
           return Response.json(state);
         }
-        if (request.method === "POST" && url.pathname === "/stop") {
+        if (request.method === "POST" && url.pathname === "/member/recheck") {
           if (request.headers.get("x-localhub-run-id") !== state.runId) {
+            return Response.json(
+              { error: "LocalHub Run identity did not match." },
+              { status: 409 },
+            );
+          }
+          if (!options.member || !state.member) {
+            return Response.json({ error: "Member recheck is not required." }, { status: 409 });
+          }
+          if (state.member.health === "ready") {
+            return Response.json({ status: "ready", member: state.member });
+          }
+          if (member && bonjour) {
+            return Response.json(
+              { status: "physical-verification-required", member: state.member },
+              { status: 202 },
+            );
+          }
+          const replacement = (options.currentInterfaces ?? currentPrivateInterfaces)().find(
+            (item) => item.name === options.member?.interface.name && isEligibleLanInterface(item),
+          );
+          if (!replacement) {
+            return Response.json(
+              { error: "Selected private interface remains unavailable." },
+              { status: 503 },
+            );
+          }
+          try {
+            const rebound = await createMemberBinding({
+              selected: replacement,
+              available: (options.currentInterfaces ?? currentPrivateInterfaces)(),
+              bonjourName: options.member.bonjourName,
+              port: options.member.port,
+            });
+            await startMemberService(rebound, true);
+            return Response.json(
+              { status: "physical-verification-required", member: state.member },
+              { status: 202 },
+            );
+          } catch (error) {
+            return Response.json({ error: errorMessage(error) }, { status: 503 });
+          }
+        }
+        if (request.method === "POST" && url.pathname === "/stop") {
+          const apiAuthorized = request.headers.get("x-localhub-run-id") === state.runId;
+          const formAuthorized =
+            url.searchParams.get("run-id") === state.runId &&
+            request.headers.get("origin") === state.host.origin;
+          if (!apiAuthorized && !formAuthorized) {
             return Response.json(
               { error: "LocalHub Run identity did not match." },
               { status: 409 },
@@ -812,6 +1265,41 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     });
     if (process.platform === "darwin") {
       await verifyListenerOwner(options.hostPort, process.pid);
+    }
+    if (memberBinding) {
+      await startMemberService(memberBinding, true);
+      memberMonitor = setInterval(() => {
+        if (!memberBinding || memberWithdrawn || stopping) return;
+        const checkedAt = memberClock();
+        const timerGap = checkedAt - lastMemberCheckAt;
+        lastMemberCheckAt = checkedAt;
+        if (timerGap > memberWakeGapMs) {
+          void withdrawMember(
+            runFailure(
+              `Host wake or timer suspension created a ${timerGap} ms Member boundary gap.`,
+              "The Member listener and Bonjour publication are closed before any same-address reuse.",
+              "The loopback Host dashboard and exact Run remain available.",
+              "Confirm the selected LAN after wake without substituting a VPN or another interface.",
+              "Run `lh member recheck` and open both displayed links again.",
+            ),
+          ).catch((error) => {
+            crashRecordError = error instanceof Error ? error : new Error(String(error));
+            lifecycleResolve();
+          });
+          return;
+        }
+        const reconciliation = reconcileMemberBinding(
+          memberBinding,
+          (options.currentInterfaces ?? currentPrivateInterfaces)(),
+        );
+        if (reconciliation.status === "withdrawn") {
+          void withdrawMember(reconciliation.failure).catch((error) => {
+            crashRecordError = error instanceof Error ? error : new Error(String(error));
+            lifecycleResolve();
+          });
+        }
+      }, memberCheckIntervalMs);
+      memberMonitor.unref();
     }
     await setState({
       ...state,
@@ -843,6 +1331,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         await host.stop(true);
         host = null;
       }
+      if (memberMonitor) clearInterval(memberMonitor);
+      await stopOptionalServer(member);
+      await stopOptionalBonjour(bonjour);
       const failure = runFailure(
         `LocalHub Run stop failed: ${errorMessage(error)}`,
         "New work is rejected and no substitute process, runtime, model, or profile was started.",
@@ -856,6 +1347,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         acceptingWork: false,
         host: { ...state.host, health: "closed" },
         llama: { ...state.llama, health: "failed" },
+        member: state.member
+          ? { ...state.member, health: "closed", bonjourPublished: false }
+          : null,
         failure,
       });
     } else {
@@ -871,11 +1365,14 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         await host.stop(true);
         host = null;
       }
+      if (memberMonitor) clearInterval(memberMonitor);
+      await stopOptionalServer(member);
+      await stopOptionalBonjour(bonjour);
       const failure = runFailure(
         `LocalHub Run start failed: ${errorMessage(error)}`,
         "No model or Run Profile was loaded; no alternate runtime was tried; LM Studio, models, configuration, and source files remain untouched.",
         "Legacy LocalHub commands still work; this Run remains stopped.",
-        "Verify the pinned llama.cpp runtime and the two recorded loopback ports, then run one explicit start again.",
+        "Resolve the exact reported runtime, loopback listener, selected-interface listener, or Bonjour publication cause without substituting another boundary.",
         "Run `lh run start`, then `lh run status`.",
       );
       await setState({
@@ -884,6 +1381,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         acceptingWork: false,
         host: { ...state.host, health: "failed" },
         llama: { ...state.llama, health: "failed" },
+        member: state.member
+          ? { ...state.member, health: "closed", bonjourPublished: false }
+          : null,
         failure,
       });
     }
@@ -951,12 +1451,67 @@ function validateRunState(value: unknown): asserts value is LocalHubRunState {
     llama.builtInAgent !== false ||
     llama.webUi !== false ||
     llama.mcpProxy !== false ||
+    !validMemberState(value.member) ||
     !nonnegativeInteger(value.activeWork) ||
     !validFailure(value.failure) ||
     !validStop(value.stop) ||
     !nonempty(value.updatedAt)
   ) {
     throw new Error("run state is incomplete, unsafe, or malformed");
+  }
+}
+
+function validMemberState(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value) || !isRecord(value.interface)) return false;
+  const selected = value.interface;
+  if (
+    !nonempty(selected.name) ||
+    !nonempty(selected.address) ||
+    !nonempty(selected.netmask) ||
+    !nonempty(value.bonjourName) ||
+    !nonnegativeInteger(value.port) ||
+    Number(value.port) < 1024 ||
+    Number(value.port) > 65535 ||
+    !nonempty(value.friendlyUrl) ||
+    !nonempty(value.ipv4Url) ||
+    !nonempty(value.listener) ||
+    !["ready", "closed", "recheck-required"].includes(String(value.health)) ||
+    typeof value.bonjourPublished !== "boolean" ||
+    !validFailure(value.failure)
+  ) {
+    return false;
+  }
+  const selectedInterface: PrivateInterface = {
+    name: selected.name,
+    address: selected.address,
+    netmask: selected.netmask,
+  };
+  if (!isEligibleLanInterface(selectedInterface)) return false;
+  if (
+    (value.health === "ready" && (value.bonjourPublished !== true || value.failure !== null)) ||
+    (value.health === "closed" && value.bonjourPublished !== false) ||
+    (value.health === "recheck-required" && value.failure === null)
+  ) {
+    return false;
+  }
+  try {
+    const friendly = new URL(value.friendlyUrl);
+    const ipv4 = new URL(value.ipv4Url);
+    return (
+      friendly.protocol === "http:" &&
+      friendly.hostname === value.bonjourName &&
+      friendly.port === String(value.port) &&
+      friendly.origin === value.friendlyUrl &&
+      ipv4.protocol === "http:" &&
+      ipv4.hostname === selected.address &&
+      ipv4.port === String(value.port) &&
+      ipv4.origin === value.ipv4Url &&
+      ipv4.host === value.listener &&
+      value.listener === `${selected.address}:${String(value.port)}`
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -1031,6 +1586,118 @@ export async function writeRunState(
   await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, finalPath);
+}
+
+function memberState(
+  binding: MemberBinding,
+  health: "ready" | "closed" | "recheck-required",
+  bonjourPublished: boolean,
+  failure: RunFailure | null,
+): NonNullable<LocalHubRunState["member"]> {
+  return {
+    interface: { ...binding.interface },
+    bonjourName: binding.bonjourName,
+    port: binding.port,
+    friendlyUrl: binding.friendlyUrl,
+    ipv4Url: binding.ipv4Url,
+    listener: new URL(binding.ipv4Url).host,
+    health,
+    bonjourPublished,
+    failure,
+  };
+}
+
+function sameMemberConfig(member: LocalHubRunState["member"], expected: RunMemberConfig): boolean {
+  return Boolean(
+    member &&
+      member.interface.name === expected.interface.name &&
+      member.interface.address === expected.interface.address &&
+      member.interface.netmask === expected.interface.netmask &&
+      member.bonjourName === expected.bonjourName &&
+      member.port === expected.port,
+  );
+}
+
+export function currentPrivateInterfaces(): PrivateInterface[] {
+  const result: PrivateInterface[] = [];
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      const candidate = { name, address: entry.address, netmask: entry.netmask };
+      if (entry.family === "IPv4" && !entry.internal && isEligibleLanInterface(candidate)) {
+        result.push(candidate);
+      }
+    }
+  }
+  return result;
+}
+
+export async function publishBonjourService(
+  binding: MemberBinding,
+  dependencies: BonjourProcessDependencies = {},
+): Promise<BonjourPublication> {
+  if (process.platform !== "darwin") {
+    throw new Error("Bonjour publication is available only on the supported macOS Host.");
+  }
+  const child = (dependencies.spawn ?? spawn)(
+    "/usr/bin/dns-sd",
+    ["-i", binding.interface.name, "-R", "LocalHub", "_http._tcp", "local.", String(binding.port)],
+    { stdio: "ignore" },
+  );
+  let stopRequested = false;
+  const exited = new Promise<Error | null>((resolve) => {
+    child.once("exit", (code, signal) => {
+      resolve(
+        stopRequested
+          ? null
+          : new Error(
+              `dns-sd exited unexpectedly (code ${String(code)}, signal ${String(signal)}).`,
+            ),
+      );
+    });
+    child.once("error", (error) => resolve(error));
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onSpawn = (): void => {
+      child.off("error", onError);
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      child.off("spawn", onSpawn);
+      reject(error);
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+  });
+  await (dependencies.sleep ?? Bun.sleep)(100);
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error("Bonjour publication exited before the Member Link was ready.");
+  }
+  let stopped = false;
+  return {
+    exited,
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      stopRequested = true;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        if (!(await (dependencies.waitForExit ?? waitForExit)(child, 1_000))) {
+          child.kill("SIGKILL");
+          if (!(await (dependencies.waitForExit ?? waitForExit)(child, 1_000))) {
+            throw new Error("Bonjour cleanup could not prove dns-sd exit after SIGKILL.");
+          }
+        }
+      }
+    },
+  };
+}
+
+async function stopOptionalServer(server: ReturnType<typeof Bun.serve> | null): Promise<void> {
+  if (server) await server.stop(true);
+}
+
+async function stopOptionalBonjour(publication: BonjourPublication | null): Promise<void> {
+  if (publication) await publication.stop();
 }
 
 function exactLlamaEnvironment(
