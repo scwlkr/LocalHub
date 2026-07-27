@@ -1,0 +1,153 @@
+name: Codex and llama.cpp compatibility evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - research/codex-llama-compat
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows 11 and WSL2 probe
+    runs-on: windows-2025
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download pinned Codex
+        shell: pwsh
+        run: |
+          $codexPath = Join-Path $env:RUNNER_TEMP "codex.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-x86_64-pc-windows-msvc.exe" `
+            -OutFile $codexPath
+          & $codexPath --version
+          "CODEX_EXE=$codexPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Run deterministic native Windows suite
+        shell: pwsh
+        run: python scripts/research/codex_compat_probe.py fake-suite --codex $env:CODEX_EXE
+
+      - name: Download pinned llama.cpp and public test model
+        shell: pwsh
+        run: |
+          $llamaArchive = Join-Path $env:RUNNER_TEMP "llama-b10107.zip"
+          $llamaDirectory = Join-Path $env:RUNNER_TEMP "llama-b10107"
+          Invoke-WebRequest `
+            -Uri "https://github.com/ggml-org/llama.cpp/releases/download/b10107/llama-b10107-bin-win-cpu-x64.zip" `
+            -OutFile $llamaArchive
+          Expand-Archive -Path $llamaArchive -DestinationPath $llamaDirectory
+          $llamaServer = (Get-ChildItem -Path $llamaDirectory -Filter "llama-server.exe" -Recurse).FullName
+
+          $modelPath = Join-Path $env:RUNNER_TEMP "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf"
+          Invoke-WebRequest `
+            -Uri "https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q4_k_m.gguf" `
+            -OutFile $modelPath
+          Get-FileHash -Algorithm SHA256 $llamaServer
+          Get-FileHash -Algorithm SHA256 $modelPath
+          "LLAMA_SERVER=$llamaServer" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TEST_MODEL=$modelPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Start tool-free llama.cpp Host
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP "llama-server.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "llama-server.stderr.log"
+          $arguments = @(
+            "-m", $env:TEST_MODEL,
+            "--host", "127.0.0.1",
+            "--port", "18881",
+            "--ctx-size", "32768",
+            "--parallel", "1",
+            "--no-kv-unified",
+            "--cache-type-k", "f16",
+            "--cache-type-v", "f16",
+            "--n-gpu-layers", "0",
+            "--fit", "off",
+            "--jinja",
+            "--no-webui",
+            "--no-agent",
+            "--metrics",
+            "--slots"
+          )
+          $server = Start-Process `
+            -FilePath $env:LLAMA_SERVER `
+            -ArgumentList $arguments `
+            -PassThru `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+          "LLAMA_PID=$($server.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            try {
+              $health = Invoke-RestMethod -Uri "http://127.0.0.1:18881/health" -TimeoutSec 2
+              if ($health.status -eq "ok") { exit 0 }
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          Get-Content $stderr
+          throw "llama-server did not become healthy"
+
+      - name: Run native Windows real-model smoke
+        shell: pwsh
+        run: |
+          Invoke-RestMethod -Uri "http://127.0.0.1:18881/props" | ConvertTo-Json -Depth 8
+          python scripts/research/codex_compat_probe.py real-smoke `
+            --codex $env:CODEX_EXE `
+            --base-url http://127.0.0.1:18881/v1
+
+      - name: Stop native Windows llama.cpp Host
+        if: always()
+        shell: pwsh
+        run: Stop-Process -Id $env:LLAMA_PID -ErrorAction SilentlyContinue
+
+      - name: Import an ephemeral Ubuntu WSL2 distribution
+        id: wsl_import
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          wsl --status
+          $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-noble-wsl.rootfs.tar.gz"
+          $install = Join-Path $env:RUNNER_TEMP "localhub-wsl2"
+          Invoke-WebRequest `
+            -Uri "https://cloud-images.ubuntu.com/wsl/noble/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz" `
+            -OutFile $rootfs
+          wsl --import LocalHubProbe $install $rootfs --version 2
+          wsl --list --verbose
+          wsl -d LocalHubProbe -- uname -a
+          wsl -d LocalHubProbe -- python3 --version
+
+      - name: Download pinned Linux Codex for WSL2
+        if: steps.wsl_import.outcome == 'success'
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "codex-linux.tar.gz"
+          $directory = Join-Path $env:RUNNER_TEMP "codex-linux"
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-x86_64-unknown-linux-musl.tar.gz" `
+            -OutFile $archive
+          tar -xzf $archive -C $directory
+          $codexLinux = (Get-ChildItem -Path $directory -Filter "codex-*" -File -Recurse).FullName
+          "CODEX_LINUX=$codexLinux" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Run deterministic WSL2 suite
+        if: steps.wsl_import.outcome == 'success'
+        shell: pwsh
+        run: |
+          $workspace = (wsl -d LocalHubProbe -- wslpath -a $env:GITHUB_WORKSPACE).Trim()
+          $codex = (wsl -d LocalHubProbe -- wslpath -a $env:CODEX_LINUX).Trim()
+          wsl -d LocalHubProbe -- python3 `
+            "$workspace/scripts/research/codex_compat_probe.py" `
+            fake-suite `
+            --codex $codex
+
+      - name: Remove ephemeral WSL2 distribution
+        if: always() && steps.wsl_import.outcome == 'success'
+        shell: pwsh
+        run: wsl --unregister LocalHubProbe
