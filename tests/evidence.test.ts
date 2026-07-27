@@ -114,6 +114,59 @@ test("evidence validation rejects credentials, private hostnames, and IP address
       validateEvidenceRecord(record, candidate, new Date("2026-07-27T20:00:00.000Z")),
     ).toThrow("Evidence contains prohibited sensitive material.");
   }
+
+  for (const prohibitedField of [
+    "prompt",
+    "response",
+    "attachment",
+    "privateContent",
+    "rawToken",
+  ]) {
+    const record: Record<string, unknown> = structuredClone(base);
+    record[prohibitedField] = "opaque private value";
+    expect(() =>
+      validateEvidenceRecord(record, candidate, new Date("2026-07-27T20:00:00.000Z")),
+    ).toThrow(`Evidence contains prohibited field: ${prohibitedField}.`);
+  }
+
+  const unknownRecords = [
+    { ...base, candidate: { ...base.candidate, extra: "ambiguous" } },
+    { ...base, environment: { ...base.environment, extra: "ambiguous" } },
+    { ...base, gates: [{ ...base.gates[0], extra: "ambiguous" }] },
+    {
+      ...base,
+      gates: [
+        {
+          ...base.gates[0],
+          priorAttempts: [
+            {
+              status: "Failed",
+              observed: "Failed safely.",
+              correction: "Corrected safely.",
+              timestamp: "2026-07-27T18:30:00.000Z",
+              extra: "ambiguous",
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  for (const record of unknownRecords) {
+    expect(() =>
+      validateEvidenceRecord(record, candidate, new Date("2026-07-27T20:00:00.000Z")),
+    ).toThrow(/contains unknown field: extra/);
+  }
+
+  expect(() =>
+    validateEvidenceRecord(
+      {
+        ...base,
+        gates: [gate("LH-J1-001", "Mandatory", "Passed"), gate("LH-J1-001", "Mandatory", "Failed")],
+      },
+      candidate,
+      new Date("2026-07-27T20:00:00.000Z"),
+    ),
+  ).toThrow("Evidence contains duplicate journey gate IDs with an ambiguous verdict.");
 });
 
 function gate(

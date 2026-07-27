@@ -79,10 +79,17 @@ export function validateEvidenceRecord(
   if (!isRecord(input)) {
     throw new Error("Evidence must be a JSON object.");
   }
+  assertNoProhibitedKeys(input);
+  assertExactKeys(
+    input,
+    ["schema", "evidenceId", "seam", "candidate", "environment", "gates"],
+    "evidence record",
+  );
   if (input.schema !== EVIDENCE_SCHEMA) {
     throw new Error(`Unsupported evidence schema: ${String(input.schema)}`);
   }
   assertSanitized(input);
+  expectNonEmptyString(input.evidenceId, "evidenceId");
   if (input.seam !== "assembled-release" && input.seam !== "controlled-external-dependency") {
     throw new Error("Evidence seam is missing or ambiguous.");
   }
@@ -99,6 +106,10 @@ export function validateEvidenceRecord(
   const gates = input.gates.map((gate, index) =>
     verifyGate(gate, index, assembledAt, now.getTime()),
   );
+  const gateIds = gates.map((gate) => gate.journeyGateId);
+  if (new Set(gateIds).size !== gateIds.length) {
+    throw new Error("Evidence contains duplicate journey gate IDs with an ambiguous verdict.");
+  }
   const record = input as unknown as EvidenceRecord;
   return { ...record, gates, releaseEvidence: record.seam === "assembled-release" };
 }
@@ -107,6 +118,11 @@ function verifyCandidateIdentity(
   identity: Record<string, unknown>,
   candidate: VerifiedReleaseCandidate,
 ): void {
+  assertExactKeys(
+    identity,
+    ["candidateId", "commit", "assetSha256", "manifestSha256"],
+    "candidate identity",
+  );
   const expected = {
     candidateId: candidate.candidate.candidateId,
     commit: candidate.manifest.release.commit,
@@ -124,6 +140,25 @@ function verifyEnvironment(value: unknown): asserts value is EvidenceEnvironment
   if (!isRecord(value)) {
     throw new Error("Evidence environment is missing.");
   }
+  assertExactKeys(
+    value,
+    [
+      "hostHardware",
+      "hostOsVersion",
+      "toolRunnerHardware",
+      "toolRunnerOsVersion",
+      "browsers",
+      "networkLane",
+      "modelVariantHashes",
+      "companionHashes",
+      "chatTemplate",
+      "runProfileRevision",
+      "effectiveSettings",
+      "measurements",
+      "testDate",
+    ],
+    "environment",
+  );
   for (const field of ["hostHardware", "hostOsVersion", "networkLane", "testDate"] as const) {
     expectNonEmptyString(value[field], `environment.${field}`);
   }
@@ -146,6 +181,19 @@ function verifyEnvironment(value: unknown): asserts value is EvidenceEnvironment
   if (!isRecord(value.measurements)) {
     throw new Error("Evidence environment.measurements is missing.");
   }
+  assertExactKeys(
+    value.measurements,
+    [
+      "loadTimeMs",
+      "firstTokenTimeMs",
+      "throughputTokensPerSecond",
+      "peakRamBytes",
+      "peakGpuBytes",
+      "queueTimeMs",
+      "toolDurationMs",
+    ],
+    "environment.measurements",
+  );
   for (const field of [
     "loadTimeMs",
     "firstTokenTimeMs",
@@ -173,6 +221,23 @@ function verifyGate(value: unknown, index: number, assembledAt: number, now: num
   if (!isRecord(value)) {
     throw new Error(`Evidence ${label} must be an object.`);
   }
+  assertExactKeys(
+    value,
+    [
+      "journeyGateId",
+      "requirementIds",
+      "classification",
+      "status",
+      "action",
+      "expected",
+      "observed",
+      "artifactLinks",
+      "tester",
+      "timestamp",
+      "priorAttempts",
+    ],
+    label,
+  );
   expectNonEmptyString(value.journeyGateId, `${label}.journeyGateId`);
   if (!/^LH-J[1-8]-\d{3}$/.test(value.journeyGateId)) {
     throw new Error(`Evidence ${label}.journeyGateId is not a stable journey gate ID.`);
@@ -244,6 +309,7 @@ function verifyAttempt(
   if (!isRecord(value) || (value.status !== "Failed" && value.status !== "Blocked")) {
     throw new Error(`Evidence ${label} must retain a Failed or Blocked attempt.`);
   }
+  assertExactKeys(value, ["status", "observed", "correction", "timestamp"], label);
   expectNonEmptyString(value.observed, `${label}.observed`);
   if (value.correction !== null && typeof value.correction !== "string") {
     throw new Error(`Evidence ${label}.correction must be a string or null.`);
@@ -323,5 +389,49 @@ function collectStrings(value: unknown, output: string[]): void {
     for (const item of Object.values(value)) {
       collectStrings(item, output);
     }
+  }
+}
+
+function assertNoProhibitedKeys(value: unknown): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      assertNoProhibitedKeys(item);
+    }
+    return;
+  }
+  if (!isRecord(value)) {
+    return;
+  }
+  const prohibited = new Set([
+    "prompt",
+    "response",
+    "attachment",
+    "attachmentcontent",
+    "privatecontent",
+    "rawtoken",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "credentials",
+  ]);
+  for (const [key, item] of Object.entries(value)) {
+    const normalized = key.replace(/[^a-z]/gi, "").toLowerCase();
+    if (prohibited.has(normalized)) {
+      throw new Error(`Evidence contains prohibited field: ${key}.`);
+    }
+    assertNoProhibitedKeys(item);
+  }
+}
+
+function assertExactKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  const allowedKeys = new Set(allowed);
+  const unknown = Object.keys(value).find((key) => !allowedKeys.has(key));
+  if (unknown) {
+    throw new Error(`Evidence ${label} contains unknown field: ${unknown}.`);
   }
 }

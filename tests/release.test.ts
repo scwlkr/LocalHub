@@ -1,17 +1,24 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { main } from "../src/cli.ts";
 import { EVIDENCE_SCHEMA } from "../src/evidence.ts";
 import {
   RELEASE_CANDIDATE_SCHEMA,
   RELEASE_MANIFEST_SCHEMA,
+  APPLE_NOTARIZED_TRUST_STATEMENT,
   assembleExpandCandidate,
   createExpandReleaseManifest,
   verifyReleaseCandidate,
 } from "../src/release.ts";
+
+const VERIFIED_TEST_ASSET = {
+  buildCommit: "a".repeat(40),
+  inspectAsset: async () =>
+    ({ format: "mach-o", architecture: "arm64", signature: "adhoc" }) as const,
+};
 
 test("an assembled candidate verifies its exact executable and manifest identity", async () => {
   const directory = await mkdtemp(join(tmpdir(), "localhub-release-"));
@@ -32,7 +39,11 @@ test("an assembled candidate verifies its exact executable and manifest identity
     };
     await writeFile(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`);
 
-    const verified = await verifyReleaseCandidate(candidatePath, executablePath);
+    const verified = await verifyReleaseCandidate(
+      candidatePath,
+      executablePath,
+      VERIFIED_TEST_ASSET,
+    );
 
     expect(verified.candidate.candidateId).toBe("localhub-0.1.1-aaaaaaaaaaaa-darwin-arm64");
     expect(verified.manifest.release.commit).toBe("a".repeat(40));
@@ -66,9 +77,9 @@ test("candidate verification rejects a substituted release-sensitive dependency"
     };
     await writeFile(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`);
 
-    expect(verifyReleaseCandidate(candidatePath, executablePath)).rejects.toThrow(
-      "Release dependency llama.cpp digest does not match the settled pin.",
-    );
+    expect(
+      verifyReleaseCandidate(candidatePath, executablePath, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow("Release dependency llama.cpp digest does not match the settled pin.");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -99,7 +110,11 @@ test("the shipped release identity command reports only a verified assembled can
     );
 
     const result = await captureOutput(() =>
-      main(["release", "identity", candidatePath], { executablePath }),
+      main(["release", "identity", candidatePath], {
+        buildCommit: VERIFIED_TEST_ASSET.buildCommit,
+        executablePath,
+        inspectReleaseAsset: VERIFIED_TEST_ASSET.inspectAsset,
+      }),
     );
 
     expect(result.code).toBe(0);
@@ -120,6 +135,7 @@ test("candidate verification rejects an ambiguous asset path even when its check
     const manifestPath = join(directory, "release-manifest.json");
     const candidatePath = join(directory, "release-candidate.json");
     await writeFile(executablePath, "assembled-localhub");
+    await writeFile(join(directory, "replacement-lh"), "assembled-localhub");
     const manifest = releaseManifest(await fileIdentity(executablePath));
     manifest.asset.path = "replacement-lh";
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
@@ -138,9 +154,9 @@ test("candidate verification rejects an ambiguous asset path even when its check
       )}\n`,
     );
 
-    expect(verifyReleaseCandidate(candidatePath, executablePath)).rejects.toThrow(
-      "Release asset path does not identify the executing candidate.",
-    );
+    expect(
+      verifyReleaseCandidate(candidatePath, executablePath, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow("Release asset path does not identify the executing candidate.");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -205,6 +221,7 @@ test("candidate assembly copies one immutable native asset and writes verifiable
     const verified = await verifyReleaseCandidate(
       assembled.candidateRecordPath,
       assembled.executablePath,
+      VERIFIED_TEST_ASSET,
     );
 
     expect(verified.candidate.assembledAt).toBe("2026-07-27T18:00:00.000Z");
@@ -240,8 +257,126 @@ test("candidate verification rejects a false trust statement", async () => {
     await writeFile(assembled.candidateRecordPath, `${JSON.stringify(candidate, null, 2)}\n`);
 
     expect(
-      verifyReleaseCandidate(assembled.candidateRecordPath, assembled.executablePath),
+      verifyReleaseCandidate(
+        assembled.candidateRecordPath,
+        assembled.executablePath,
+        VERIFIED_TEST_ASSET,
+      ),
     ).rejects.toThrow("Unnotarized release trust wording does not match the settled contract.");
+
+    manifest.trust = {
+      state: "apple-notarized",
+      statement: APPLE_NOTARIZED_TRUST_STATEMENT,
+    };
+    await writeFile(assembled.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    candidate.manifest = {
+      path: "release-manifest.json",
+      ...(await fileIdentity(assembled.manifestPath)),
+    };
+    await writeFile(assembled.candidateRecordPath, `${JSON.stringify(candidate, null, 2)}\n`);
+    expect(
+      verifyReleaseCandidate(
+        assembled.candidateRecordPath,
+        assembled.executablePath,
+        VERIFIED_TEST_ASSET,
+      ),
+    ).rejects.toThrow(
+      "Apple-notarized trust is unavailable until notarization proof is implemented.",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("candidate verification binds source commit, architecture, and ad-hoc signature", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "localhub-asset-proof-"));
+  try {
+    const sourceExecutable = join(directory, "built-lh");
+    await writeFile(sourceExecutable, "native-assembled-localhub");
+    const assembled = await assembleExpandCandidate({
+      assembledAt: new Date("2026-07-27T18:00:00.000Z"),
+      commit: "a".repeat(40),
+      outputDirectory: join(directory, "candidate"),
+      sourceExecutable,
+      tag: null,
+      testedOsVersion: "27.0 (26A5388g)",
+      version: "0.1.1",
+    });
+
+    expect(
+      verifyReleaseCandidate(assembled.candidateRecordPath, assembled.executablePath, {
+        ...VERIFIED_TEST_ASSET,
+        buildCommit: "b".repeat(40),
+      }),
+    ).rejects.toThrow("Executing asset build commit does not match the candidate source commit.");
+    expect(
+      verifyReleaseCandidate(assembled.candidateRecordPath, assembled.executablePath, {
+        buildCommit: "a".repeat(40),
+        inspectAsset: async () => ({
+          format: "other",
+          architecture: "other",
+          signature: "invalid",
+        }),
+      }),
+    ).rejects.toThrow("Release asset is not a native arm64 Mach-O executable.");
+    expect(
+      verifyReleaseCandidate(assembled.candidateRecordPath, assembled.executablePath, {
+        buildCommit: "a".repeat(40),
+        inspectAsset: async () => ({
+          format: "mach-o",
+          architecture: "arm64",
+          signature: "invalid",
+        }),
+      }),
+    ).rejects.toThrow("Unnotarized release asset does not have a valid ad-hoc signature.");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("candidate verification rejects asset traversal and symlink escape", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "localhub-path-proof-"));
+  try {
+    const sourceExecutable = join(directory, "outside-lh");
+    await writeFile(sourceExecutable, "native-assembled-localhub");
+    const assembled = await assembleExpandCandidate({
+      assembledAt: new Date("2026-07-27T18:00:00.000Z"),
+      commit: "a".repeat(40),
+      outputDirectory: join(directory, "candidate"),
+      sourceExecutable,
+      tag: null,
+      testedOsVersion: "27.0 (26A5388g)",
+      version: "0.1.1",
+    });
+    const manifest = JSON.parse(await readFile(assembled.manifestPath, "utf8"));
+    const candidate = JSON.parse(await readFile(assembled.candidateRecordPath, "utf8"));
+    const outsideIdentity = await fileIdentity(sourceExecutable);
+
+    manifest.asset = { path: "../outside-lh", ...outsideIdentity };
+    await writeFile(assembled.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    candidate.asset = manifest.asset;
+    candidate.manifest = {
+      path: "release-manifest.json",
+      ...(await fileIdentity(assembled.manifestPath)),
+    };
+    await writeFile(assembled.candidateRecordPath, `${JSON.stringify(candidate, null, 2)}\n`);
+    expect(
+      verifyReleaseCandidate(assembled.candidateRecordPath, sourceExecutable, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow("release asset path escapes the assembled candidate.");
+
+    const linkedAsset = join(dirname(assembled.executablePath), "linked-lh");
+    await symlink("../outside-lh", linkedAsset);
+    manifest.asset = { path: "linked-lh", ...outsideIdentity };
+    await writeFile(assembled.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    candidate.asset = manifest.asset;
+    candidate.manifest = {
+      path: "release-manifest.json",
+      ...(await fileIdentity(assembled.manifestPath)),
+    };
+    await writeFile(assembled.candidateRecordPath, `${JSON.stringify(candidate, null, 2)}\n`);
+    expect(
+      verifyReleaseCandidate(assembled.candidateRecordPath, linkedAsset, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow("release asset must be a regular, non-symlink file.");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -265,6 +400,7 @@ test("the shipped evidence command rejects stale, malformed, sensitive, and mism
     const candidate = await verifyReleaseCandidate(
       assembled.candidateRecordPath,
       assembled.executablePath,
+      VERIFIED_TEST_ASSET,
     );
     const validRecord = {
       schema: EVIDENCE_SCHEMA,
@@ -307,7 +443,9 @@ test("the shipped evidence command rejects stale, malformed, sensitive, and mism
       (
         await captureOutput(() =>
           main(["evidence", "validate", assembled.candidateRecordPath, evidencePath], {
+            buildCommit: VERIFIED_TEST_ASSET.buildCommit,
             executablePath: assembled.executablePath,
+            inspectReleaseAsset: VERIFIED_TEST_ASSET.inspectAsset,
           }),
         )
       ).code,
@@ -328,7 +466,9 @@ test("the shipped evidence command rejects stale, malformed, sensitive, and mism
         (
           await captureOutput(() =>
             main(["evidence", "validate", assembled.candidateRecordPath, evidencePath], {
+              buildCommit: VERIFIED_TEST_ASSET.buildCommit,
               executablePath: assembled.executablePath,
+              inspectReleaseAsset: VERIFIED_TEST_ASSET.inspectAsset,
             }),
           )
         ).code,

@@ -48,10 +48,7 @@ export interface CandidateSmokeOptions {
 }
 
 interface SmokeGate {
-  action: string;
   command: string[];
-  expected: string;
-  requirementIds: string[];
   passed(result: AcceptanceProcessResult): boolean;
 }
 
@@ -62,39 +59,51 @@ export async function runCandidateSmoke(
   const version = options.candidate.manifest.release.version;
   const gates: SmokeGate[] = [
     {
-      action: "$CANDIDATE/lh release identity $CANDIDATE/release-candidate.json",
       command: [options.executablePath, "release", "identity", options.candidateRecordPath],
-      expected: "The shipped command verifies and reports the exact candidate identity.",
-      requirementIds: ["LH-PIN-005", "LH-EVD-001"],
       passed: (result) => result.code === 0,
     },
     {
-      action: "$CANDIDATE/lh --help",
       command: [options.executablePath, "--help"],
-      expected: "The assembled candidate exposes legacy help.",
-      requirementIds: ["LH-GOV-011"],
       passed: (result) => result.code === 0 && result.stdout.includes("Usage:"),
     },
     {
-      action: "$CANDIDATE/lh --version",
       command: [options.executablePath, "--version"],
-      expected: `The assembled candidate reports LocalHub ${version}.`,
-      requirementIds: ["LH-PIN-005"],
       passed: (result) => result.code === 0 && result.stdout.trim() === version,
     },
     {
-      action: "$CANDIDATE/lh status",
       command: [options.executablePath, "status"],
-      expected: "Legacy status executes and reports its real ready or unavailable state.",
-      requirementIds: ["LH-TST-001"],
       passed: (result) => result.code === 0 || result.code === 1,
     },
   ];
 
-  const records: EvidenceGate[] = [];
+  let passedSteps = 0;
   for (const gate of gates) {
-    records.push(await runSmokeGate(gate, options.artifactLinks, dependencies));
+    try {
+      const result = await dependencies.process.run(gate.command);
+      if (gate.passed(result)) {
+        passedSteps += 1;
+      }
+    } catch {
+      // The composite gate fails. Raw exception text may contain private paths or host data.
+    }
   }
+  const passed = passedSteps === gates.length;
+  const composite: EvidenceGate = {
+    journeyGateId: "LH-J1-001",
+    requirementIds: ["LH-GOV-011", "LH-PIN-005", "LH-TST-001", "LH-EVD-001"],
+    classification: "Mandatory",
+    status: passed ? "Passed" : "Failed",
+    action:
+      "$CANDIDATE/lh release identity; $CANDIDATE/lh --help; $CANDIDATE/lh --version; $CANDIDATE/lh status",
+    expected: `The exact candidate verifies its identity and preserves LocalHub ${version} help, version, and honest status behavior.`,
+    observed: passed
+      ? "All four public candidate entrances matched the expected boundary."
+      : `${passedSteps} of ${gates.length} public candidate entrances matched; captured output was not retained.`,
+    artifactLinks: options.artifactLinks,
+    tester: "LocalHub candidate acceptance driver",
+    timestamp: dependencies.clock.now().toISOString(),
+    priorAttempts: [],
+  };
   return {
     schema: EVIDENCE_SCHEMA,
     evidenceId: options.evidenceId,
@@ -106,38 +115,6 @@ export async function runCandidateSmoke(
       manifestSha256: options.candidate.candidate.manifest.sha256,
     },
     environment: options.environment,
-    gates: records,
-  };
-}
-
-async function runSmokeGate(
-  gate: SmokeGate,
-  artifactLinks: string[],
-  dependencies: AcceptanceDependencies,
-): Promise<EvidenceGate> {
-  let status: EvidenceGate["status"] = "Failed";
-  let observed = "The public command failed before returning a result.";
-  try {
-    const result = await dependencies.process.run(gate.command);
-    status = gate.passed(result) ? "Passed" : "Failed";
-    observed =
-      status === "Passed"
-        ? "The public command matched the expected boundary."
-        : `The public command exited ${result.code}; captured output was not retained.`;
-  } catch {
-    // The result remains Failed. Raw exception text may contain private paths or host data.
-  }
-  return {
-    journeyGateId: "LH-J1-001",
-    requirementIds: gate.requirementIds,
-    classification: "Mandatory",
-    status,
-    action: gate.action,
-    expected: gate.expected,
-    observed,
-    artifactLinks,
-    tester: "LocalHub candidate acceptance driver",
-    timestamp: dependencies.clock.now().toISOString(),
-    priorAttempts: [],
+    gates: [composite],
   };
 }

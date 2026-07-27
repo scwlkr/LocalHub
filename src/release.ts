@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const RELEASE_CANDIDATE_SCHEMA = "localhub.release-candidate/v1";
@@ -83,6 +92,17 @@ export interface ReleaseManifest {
 export interface VerifiedReleaseCandidate {
   candidate: ReleaseCandidate;
   manifest: ReleaseManifest;
+}
+
+export interface ReleaseAssetInspection {
+  format: "mach-o" | "other";
+  architecture: "arm64" | "other";
+  signature: "adhoc" | "developer-id" | "invalid";
+}
+
+export interface ReleaseVerificationOptions {
+  buildCommit: string;
+  inspectAsset?: (path: string) => Promise<ReleaseAssetInspection>;
 }
 
 export interface ExpandReleaseManifestOptions {
@@ -175,23 +195,31 @@ export async function assembleExpandCandidate(
 export async function verifyReleaseCandidate(
   candidatePath: string,
   executablePath: string,
+  options: ReleaseVerificationOptions,
 ): Promise<VerifiedReleaseCandidate> {
   const candidate = JSON.parse(await readFile(candidatePath, "utf8")) as ReleaseCandidate;
   validateCandidateRecord(candidate);
 
-  const candidateDirectory = dirname(resolve(candidatePath));
+  const candidateDirectory = await realpath(dirname(resolve(candidatePath)));
   const manifestPath = resolve(candidateDirectory, candidate.manifest.path);
   const declaredAssetPath = resolve(candidateDirectory, candidate.asset.path);
-  if (!isInside(candidateDirectory, manifestPath)) {
-    throw new Error("Release manifest path escapes the assembled candidate.");
-  }
-  if (declaredAssetPath !== resolve(executablePath)) {
+  const verifiedManifestPath = await verifyContainedRegularFile(
+    candidateDirectory,
+    manifestPath,
+    "release manifest",
+  );
+  const verifiedAssetPath = await verifyContainedRegularFile(
+    candidateDirectory,
+    declaredAssetPath,
+    "release asset",
+  );
+  if (verifiedAssetPath !== (await realpath(executablePath))) {
     throw new Error("Release asset path does not identify the executing candidate.");
   }
-  await verifyFile(manifestPath, candidate.manifest, "release manifest");
-  await verifyFile(executablePath, candidate.asset, "release asset");
+  await verifyFile(verifiedManifestPath, candidate.manifest, "release manifest");
+  await verifyFile(verifiedAssetPath, candidate.asset, "release asset");
 
-  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReleaseManifest;
+  const manifest = JSON.parse(await readFile(verifiedManifestPath, "utf8")) as ReleaseManifest;
   validateManifest(manifest);
   if (manifest.candidateId !== candidate.candidateId) {
     throw new Error("Release manifest candidate identity does not match the candidate record.");
@@ -205,6 +233,16 @@ export async function verifyReleaseCandidate(
   }
 
   verifyDependencyPins(manifest);
+  if (options.buildCommit !== manifest.release.commit) {
+    throw new Error("Executing asset build commit does not match the candidate source commit.");
+  }
+  const inspection = await (options.inspectAsset ?? inspectMacAsset)(verifiedAssetPath);
+  if (inspection.format !== "mach-o" || inspection.architecture !== "arm64") {
+    throw new Error("Release asset is not a native arm64 Mach-O executable.");
+  }
+  if (manifest.trust.state === "unnotarized" && inspection.signature !== "adhoc") {
+    throw new Error("Unnotarized release asset does not have a valid ad-hoc signature.");
+  }
 
   return { candidate, manifest };
 }
@@ -269,6 +307,11 @@ function validateManifest(manifest: ReleaseManifest): void {
   ) {
     throw new Error("Apple-notarized release trust wording does not match the settled contract.");
   }
+  if (manifest.trust?.state === "apple-notarized") {
+    throw new Error(
+      "Apple-notarized trust is unavailable until notarization proof is implemented.",
+    );
+  }
   if (manifest.trust?.state !== "unnotarized" && manifest.trust?.state !== "apple-notarized") {
     throw new Error("Release trust state is missing or ambiguous.");
   }
@@ -298,6 +341,58 @@ function isInside(directory: string, path: string): boolean {
     !pathFromDirectory.startsWith("..") &&
     !isAbsolute(pathFromDirectory)
   );
+}
+
+async function verifyContainedRegularFile(
+  directory: string,
+  path: string,
+  label: string,
+): Promise<string> {
+  if (!isInside(directory, path)) {
+    throw new Error(`${label} path escapes the assembled candidate.`);
+  }
+  const metadata = await lstat(path);
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error(`${label} must be a regular, non-symlink file.`);
+  }
+  const resolved = await realpath(path);
+  if (!isInside(directory, resolved)) {
+    throw new Error(`${label} resolves outside the assembled candidate.`);
+  }
+  return resolved;
+}
+
+async function inspectMacAsset(path: string): Promise<ReleaseAssetInspection> {
+  const contents = await readFile(path);
+  const isMachO64 = contents.length >= 12 && contents.readUInt32LE(0) === 0xfeedfacf;
+  const isArm64 = isMachO64 && contents.readUInt32LE(4) === 0x0100000c;
+  if (!isMachO64 || !isArm64) {
+    return { format: isMachO64 ? "mach-o" : "other", architecture: "other", signature: "invalid" };
+  }
+  const verify = Bun.spawn(["codesign", "--verify", "--strict", path], {
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if ((await verify.exited) !== 0) {
+    return { format: "mach-o", architecture: "arm64", signature: "invalid" };
+  }
+  const describe = Bun.spawn(["codesign", "-dvvv", path], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stdout, stderr] = await Promise.all([
+    describe.exited,
+    new Response(describe.stdout).text(),
+    new Response(describe.stderr).text(),
+  ]);
+  const description = `${stdout}\n${stderr}`;
+  if (code === 0 && description.includes("Signature=adhoc")) {
+    return { format: "mach-o", architecture: "arm64", signature: "adhoc" };
+  }
+  if (code === 0 && description.includes("Authority=Developer ID Application")) {
+    return { format: "mach-o", architecture: "arm64", signature: "developer-id" };
+  }
+  return { format: "mach-o", architecture: "arm64", signature: "invalid" };
 }
 
 function verifyDependencyPins(manifest: ReleaseManifest): void {

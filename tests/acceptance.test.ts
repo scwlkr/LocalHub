@@ -61,6 +61,8 @@ test("controlled external conditions drive only public commands and never become
     ["/candidate/lh", "status"],
   ]);
   expect(validated.releaseEvidence).toBe(false);
+  expect(validated.gates).toHaveLength(1);
+  expect(validated.gates[0]?.status).toBe("Passed");
   expect(JSON.stringify(record)).not.toContain("private-machine.local");
   expect(JSON.stringify(record)).not.toContain("controlled-llama.invalid");
 });

@@ -5,13 +5,13 @@ import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
 import { validateEvidenceRecord } from "./evidence.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
-import { verifyReleaseCandidate } from "./release.ts";
+import { verifyReleaseCandidate, type ReleaseAssetInspection } from "./release.ts";
 import { collectRuntime } from "./runtime.ts";
 import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
 import type { LocalHubConfig } from "./types.ts";
 export { VERSION } from "./version.ts";
-import { VERSION } from "./version.ts";
+import { BUILD_COMMIT, VERSION } from "./version.ts";
 
 const HELP = `LocalHub ${VERSION}
 
@@ -42,12 +42,14 @@ with hidden input; scripts may set tokenEnv (default: LM_API_TOKEN).
 
 export interface CliDependencies {
   arch?: string;
+  buildCommit?: string;
   collect?: typeof collectRuntime;
   configFile?: string;
   interactive?: boolean;
   load?: typeof loadConfig;
   env?: NodeJS.ProcessEnv;
   executablePath?: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
   platform?: NodeJS.Platform;
   runInteractive?: typeof runTui;
   runLocalCodex?: typeof runCodex;
@@ -63,6 +65,14 @@ export async function main(
   dependencies: CliDependencies = {},
 ): Promise<number> {
   if (args[0] === "release") {
+    if (args.length === 2 && args[1] === "build-commit") {
+      if (!/^[0-9a-f]{40}$/.test(BUILD_COMMIT)) {
+        console.error("Build commit is unavailable from a source checkout.");
+        return 2;
+      }
+      console.log(BUILD_COMMIT);
+      return 0;
+    }
     if (args.length !== 3 || args[1] !== "identity") {
       console.error("Usage: lh release identity <release-candidate.json>");
       return 2;
@@ -71,6 +81,12 @@ export async function main(
       const candidate = await verifyReleaseCandidate(
         args[2] ?? "",
         dependencies.executablePath ?? process.execPath,
+        {
+          buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+          ...(dependencies.inspectReleaseAsset
+            ? { inspectAsset: dependencies.inspectReleaseAsset }
+            : {}),
+        },
       );
       console.log(JSON.stringify(candidate, null, 2));
       return 0;
@@ -88,6 +104,12 @@ export async function main(
       const candidate = await verifyReleaseCandidate(
         args[2] ?? "",
         dependencies.executablePath ?? process.execPath,
+        {
+          buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+          ...(dependencies.inspectReleaseAsset
+            ? { inspectAsset: dependencies.inspectReleaseAsset }
+            : {}),
+        },
       );
       const record = await Bun.file(args[3] ?? "").json();
       const evidence = validateEvidenceRecord(record, candidate);

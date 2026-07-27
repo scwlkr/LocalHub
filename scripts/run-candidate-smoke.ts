@@ -30,7 +30,10 @@ if (typeof candidateJson.asset?.path !== "string") {
   process.exit(2);
 }
 const executablePath = resolve(dirname(candidateRecordPath), candidateJson.asset.path);
-const candidate = await verifyReleaseCandidate(candidateRecordPath, executablePath);
+const buildCommit = await command([executablePath, "release", "build-commit"]);
+const candidate = await verifyReleaseCandidate(candidateRecordPath, executablePath, {
+  buildCommit,
+});
 const environment = await collectEnvironment(seam);
 const dependencies: AcceptanceDependencies = {
   process: {

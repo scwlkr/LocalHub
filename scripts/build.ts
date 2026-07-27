@@ -25,6 +25,7 @@ const nativeTarget: Target | null =
       : null;
 const requested = Bun.argv[2] as Target | undefined;
 const target = requested ?? nativeTarget;
+const buildCommit = await gitCommit();
 
 if (!versionAtLeast(Bun.version, MINIMUM_BUN_VERSION)) {
   console.error(
@@ -49,11 +50,17 @@ if (!versionAtLeast(Bun.version, MINIMUM_BUN_VERSION)) {
         "--compile",
         "--minify",
         `--target=${target}`,
+        "--env=LOCALHUB_BUILD_*",
         "src/cli.ts",
         "--outfile",
         definition.outfile,
       ],
-      { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+      {
+        env: { ...process.env, LOCALHUB_BUILD_COMMIT: buildCommit },
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      },
     );
     const buildCode = await build.exited;
     if (buildCode !== 0) {
@@ -79,6 +86,19 @@ if (!versionAtLeast(Bun.version, MINIMUM_BUN_VERSION)) {
       }
     }
   }
+}
+
+async function gitCommit(): Promise<string> {
+  const process = Bun.spawn(["git", "rev-parse", "HEAD"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stdout] = await Promise.all([process.exited, new Response(process.stdout).text()]);
+  const commit = stdout.trim();
+  if (code !== 0 || !/^[0-9a-f]{40}$/.test(commit)) {
+    throw new Error("Standalone builds require an exact Git source commit.");
+  }
+  return commit;
 }
 
 function versionAtLeast(actual: string, minimum: string): boolean {

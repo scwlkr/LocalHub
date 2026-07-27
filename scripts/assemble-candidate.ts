@@ -16,8 +16,14 @@ if (status.length !== 0) {
   console.error("Candidate assembly requires a clean tracked source commit.");
   process.exit(2);
 }
+await expectExit([process.execPath, "run", "scripts/build.ts"], 0);
 if (!(await Bun.file(sourceExecutable).exists())) {
   console.error("Missing dist/lh. Build the native standalone executable first.");
+  process.exit(2);
+}
+const embeddedCommit = await command([sourceExecutable, "release", "build-commit"], repository);
+if (embeddedCommit !== commit) {
+  console.error("Built executable does not identify the clean source commit.");
   process.exit(2);
 }
 await expectExit([sourceExecutable, "--version"], 0);
