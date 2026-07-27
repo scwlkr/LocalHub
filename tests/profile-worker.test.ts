@@ -179,6 +179,48 @@ test("worker failure remains an exact failed observation and still stops its pro
   });
 });
 
+test("Apple device inventory accepts the exact b10107 MTL label", async () => {
+  const revision = profileRevision();
+  const model = installedModel();
+  const result = await runProfileWorker(
+    { binaryPath: "/candidate/llama-server", model, port: 41000, revision },
+    {
+      binarySha256: async () => "e".repeat(64),
+      command: async (command) => ({
+        code: 0,
+        stdout:
+          command[1] === "--version"
+            ? "version: 10107 (c0bc8591e)"
+            : "Available devices:\n  MTL0: Apple M1 Max\n  BLAS: Accelerate",
+        stderr: "",
+      }),
+      host: async () => ({ hardware: "Apple M1 Max", osVersion: "macOS 27.0" }),
+      now: () => 1_000,
+      sampleGpuBytes: async () => 1,
+      sampleResidentBytes: async () => 1,
+      start: async () => ({
+        pid: 321,
+        exited: Promise.resolve(0),
+        logs: Promise.resolve(""),
+        stop: async () => ({ graceful: true, code: 0 }),
+      }),
+      transport: {
+        waitForHealth: async () => undefined,
+        props: async () => ({ modelPath: "/models/exact.gguf" }),
+        slots: async () => [
+          { id: 0, state: "idle", contextSize: 4096 },
+          { id: 1, state: "idle", contextSize: 4096 },
+        ],
+        text: async () => ({ outputTokens: 1, firstTokenTimeMs: 1, throughput: 1 }),
+        cancel: async () => ({ passed: true, slotReleasedMs: 1 }),
+      },
+    },
+  );
+
+  expect(result.effective.placement).toBe("MTL0");
+  expect(result.host.devices).toContain("MTL0: Apple M1 Max");
+});
+
 function profileRevision(): RunProfileRevision {
   return {
     id: "revision-1",

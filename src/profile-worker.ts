@@ -596,7 +596,7 @@ function deviceInventory(output: string): string[] {
   const values = output
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => /Metal|CUDA|Vulkan|ROCm/i.test(line))
+    .filter((line) => /Metal|MTL\d*|BLAS|CUDA|Vulkan|ROCm/i.test(line))
     .map((line) => line.replace(/^[-*]\s*/, ""));
   return [...new Set(values)];
 }
