@@ -706,25 +706,27 @@ function observedEffectiveSettings(
   const warmupProven = controls.warmup
     ? /warming up the model/i.test(logs)
     : !/warming up the model/i.test(logs);
-  if (
-    !gpuPlacementProven ||
-    context !== controls.contextSize ||
-    batch !== controls.batchSize ||
-    microBatch !== controls.microBatchSize ||
-    slotCount !== controls.parallelSlots ||
-    contextPerSlot !== controls.contextSize ||
-    Number(threads?.[1]) !== controls.threads ||
-    Number(threads?.[2]) !== controls.threadsBatch ||
-    cache?.[1]?.toLowerCase() !== controls.cacheTypeK.toLowerCase() ||
-    cache?.[2]?.toLowerCase() !== controls.cacheTypeV.toLowerCase() ||
-    loadMode !== controls.loadMode ||
-    (controls.flashAttention === "on" ? !flashEnabled : !flashDisabled) ||
-    (controls.kvUnified ? !kvUnified : !kvPerSlot) ||
-    !warmupProven ||
-    !/model loaded/i.test(logs)
-  ) {
+  const proof = [
+    ["placement", gpuPlacementProven],
+    ["context", context === controls.contextSize],
+    ["batch", batch === controls.batchSize],
+    ["micro-batch", microBatch === controls.microBatchSize],
+    ["slot-count", slotCount === controls.parallelSlots],
+    ["context-per-slot", contextPerSlot === controls.contextSize],
+    ["threads", Number(threads?.[1]) === controls.threads],
+    ["batch-threads", Number(threads?.[2]) === controls.threadsBatch],
+    ["cache-k", cache?.[1]?.toLowerCase() === controls.cacheTypeK.toLowerCase()],
+    ["cache-v", cache?.[2]?.toLowerCase() === controls.cacheTypeV.toLowerCase()],
+    ["load-mode", loadMode === controls.loadMode],
+    ["flash-attention", controls.flashAttention === "on" ? flashEnabled : flashDisabled],
+    ["kv-layout", controls.kvUnified ? kvUnified : kvPerSlot],
+    ["warmup", warmupProven],
+    ["model-loaded", /model loaded/i.test(logs)],
+  ] as const;
+  const missing = proof.filter(([, passed]) => !passed).map(([name]) => name);
+  if (missing.length > 0) {
     throw new Error(
-      "Pinned llama.cpp logs did not prove the exact effective placement and load settings.",
+      `Pinned llama.cpp logs did not prove the exact effective placement and load settings (missing: ${missing.join(", ")}).`,
     );
   }
   return {
