@@ -271,6 +271,13 @@ test("the CI lifecycle evidence script does not claim a physical Host", async ()
   expect(script).not.toContain("Physical Apple-silicon Host");
 });
 
+test("model acquisition evidence gives deterministic and physical runs distinct identities", async () => {
+  const script = await Bun.file(
+    new URL("../scripts/run-model-acquisition-smoke.ts", import.meta.url),
+  ).text();
+  expect(script).toContain('physicalLocalSource ? "physical" : "deterministic"');
+});
+
 test("CI archives and round-trips candidate symlinks instead of uploading the raw tree", async () => {
   const workflow = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
   expect(workflow).toContain('tar -czf "$archive" -C dist/candidates "$candidate_name"');

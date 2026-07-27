@@ -45,6 +45,7 @@ const sourcePath = selectedSourcePath
 if (!selectedSourcePath) await writeFile(sourcePath, deterministicGguf(), { mode: 0o600 });
 const sourceBytes = new Uint8Array(await Bun.file(sourcePath).arrayBuffer());
 const sourceSha256 = createHash("sha256").update(sourceBytes).digest("hex");
+const physicalLocalSource = selectedSourcePath !== undefined;
 
 const storage = await statfs(modelStoragePath, { bigint: true });
 let firstRun = createFirstRunState(candidate);
@@ -108,8 +109,8 @@ const record = await runModelAcquisitionSmoke(
     candidate,
     candidateRecordPath: absoluteCandidatePath,
     executablePath,
-    evidenceId: `t04-local-model-${candidate.manifest.release.commit.slice(0, 12)}`,
-    environment: await collectEnvironment(sourceSha256, selectedSourcePath !== undefined),
+    evidenceId: `t04-${physicalLocalSource ? "physical" : "deterministic"}-local-model-${candidate.manifest.release.commit.slice(0, 12)}`,
+    environment: await collectEnvironment(sourceSha256, physicalLocalSource),
     seam: "assembled-release",
     artifactLinks: [
       `https://github.com/scwlkr/LocalHub/commit/${candidate.manifest.release.commit}`,
