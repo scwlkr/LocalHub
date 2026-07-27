@@ -235,6 +235,7 @@ export async function assembleExpandCandidate(
         recursive: true,
         dereference: false,
         preserveTimestamps: true,
+        verbatimSymlinks: true,
       });
       llamaRuntime = {
         root: "runtime/llama.cpp",
