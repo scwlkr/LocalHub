@@ -58,6 +58,32 @@ jobs:
       - name: Smoke test standalone executable
         run: ${{ matrix.executable }} --help
 
+      - name: Assemble exact macOS candidate
+        if: runner.os == 'macOS'
+        run: bun run candidate:assemble
+
+      - name: Drive candidate through shipped commands
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bun run candidate:smoke \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t01-assembled-release.json
+          dist/candidates/*/lh evidence validate \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t01-assembled-release.json
+
+      - name: Retain candidate and sanitized evidence
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: t01-macos-arm64-${{ github.sha }}
+          path: |
+            dist/candidates/
+            dist/evidence/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Test Windows source installer
         if: runner.os == 'Windows'
         shell: powershell

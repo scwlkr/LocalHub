@@ -1,0 +1,19 @@
+# Keep formatter inputs stable when Git checks the repository out on Windows.
+* text=auto eol=lf
+
+# Windows-native scripts remain readable in Windows tooling; PowerShell accepts either style.
+*.ps1 text eol=crlf
+
+# Shell entry points must never acquire a CR in their interpreter line.
+*.sh text eol=lf
+
+# Binary assets are never normalized.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.ico binary
+*.woff binary
+*.woff2 binary
