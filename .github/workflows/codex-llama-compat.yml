@@ -112,7 +112,6 @@ jobs:
 
       - name: Import an ephemeral Ubuntu WSL2 distribution
         id: wsl_import
-        continue-on-error: true
         shell: pwsh
         run: |
           wsl --status
