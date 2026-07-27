@@ -217,7 +217,9 @@ test("the real supervisor boundary reaches health, reports no model proof, then 
   const runtimeDirectory = join(root, "runtime");
   await mkdir(runtimeDirectory, { recursive: true });
   const fakeLlama = join(runtimeDirectory, "llama-server");
-  await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+  await writeFile(fakeLlama, fakeLlamaSource({ preflightLockPath: join(root, "preflight.lock") }), {
+    mode: 0o755,
+  });
   const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
 
   const supervisor = serveLocalHubRun({
@@ -458,14 +460,30 @@ async function withDeadline<T>(promise: Promise<T>, checkpoint: string): Promise
   ]);
 }
 
-function fakeLlamaSource(options: { healthStatus?: number } = {}): string {
+function fakeLlamaSource(
+  options: { healthStatus?: number; preflightLockPath?: string } = {},
+): string {
   return `#!/usr/bin/env bun
+import { rm, writeFile } from "node:fs/promises";
 const args = Bun.argv.slice(2);
+const lockPath = ${JSON.stringify(options.preflightLockPath ?? null)};
 if (args.includes("--version")) {
+  if (lockPath) {
+    await writeFile(lockPath, "version");
+    await Bun.sleep(100);
+    await rm(lockPath, { force: true });
+  }
   console.log("version: 10107 (c0bc8591e)");
   process.exit(0);
 }
 if (args.includes("--list-devices")) {
+  if (lockPath) {
+    await Bun.sleep(25);
+    if (await Bun.file(lockPath).exists()) {
+      console.error("concurrent runtime preflight");
+      process.exit(9);
+    }
+  }
   console.log("Metal: Apple test GPU");
   process.exit(0);
 }

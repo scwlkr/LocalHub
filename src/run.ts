@@ -717,16 +717,14 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
 
   try {
     const startupDeadline = Date.now() + options.startupDeadlineMs;
-    const [versionOutput, deviceOutput] = await Promise.all([
-      runFinite(
-        [options.bundle.llama.binaryPath, "--version"],
-        remainingDeadline(startupDeadline, 5_000),
-      ),
-      runFinite(
-        [options.bundle.llama.binaryPath, "--list-devices"],
-        remainingDeadline(startupDeadline, 20_000),
-      ),
-    ]);
+    const versionOutput = await runFinite(
+      [options.bundle.llama.binaryPath, "--version"],
+      remainingDeadline(startupDeadline, 5_000),
+    );
+    const deviceOutput = await runFinite(
+      [options.bundle.llama.binaryPath, "--list-devices"],
+      remainingDeadline(startupDeadline, 20_000),
+    );
     if (!/version:\s*10107\b/.test(versionOutput) || !versionOutput.includes("c0bc8591e")) {
       throw new Error("the included binary did not report pinned build b10107 at c0bc8591e");
     }
