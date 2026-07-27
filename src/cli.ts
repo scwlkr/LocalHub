@@ -910,7 +910,9 @@ async function runProfileCommand(
       });
     }
     case "profile-revise": {
-      const ledger = await inspectRunProfiles(context.storagePath);
+      const ledger = await inspectRunProfiles(context.storagePath, {
+        currentRuntime: context.runtime,
+      });
       const previous = ledger.revisions.find((item) => item.id === command.revisionId);
       if (!previous) throw new Error(`Unknown exact Run Profile revision: ${command.revisionId}.`);
       return await reviseRunProfile(context.storagePath, previous.id, {
@@ -919,7 +921,7 @@ async function runProfileCommand(
     }
     case "profile-test": {
       const [ledger, models] = await Promise.all([
-        inspectRunProfiles(context.storagePath),
+        inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime }),
         inspectInstalledModels(context.storagePath),
       ]);
       const revision = ledger.revisions.find((item) => item.id === command.revisionId);
@@ -945,40 +947,55 @@ async function runProfileCommand(
         model,
         port: await (dependencies.profilePort ?? findProfileWorkerPort)(),
       });
-      return await testRunProfile(context.storagePath, revision.id, observation);
+      const result = await testRunProfile(context.storagePath, revision.id, observation);
+      if (result.outcome === "Failed") {
+        throw new Error(result.failure ?? "Exact Profile Test failed without a recorded cause.");
+      }
+      return result;
     }
     case "profile-list":
-      return await inspectRunProfiles(context.storagePath);
+      return await inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime });
     case "shared-publish":
-      return await publishSharedModel(context.storagePath, {
-        name: command.name,
-        revisionId: command.revisionId,
-        limits: {
-          contextTokens: command.contextTokens,
-          outputTokens: command.outputTokens,
-          concurrentRequests: command.concurrentRequests,
+      return await publishSharedModel(
+        context.storagePath,
+        {
+          name: command.name,
+          revisionId: command.revisionId,
+          limits: {
+            contextTokens: command.contextTokens,
+            outputTokens: command.outputTokens,
+            concurrentRequests: command.concurrentRequests,
+          },
+          capabilities: ["text"],
         },
-        capabilities: ["text"],
-      });
+        { currentRuntime: context.runtime },
+      );
     case "shared-transition":
       if (command.transition === "pin" || command.transition === "unpin") {
         return await setSharedModelPin(
           context.storagePath,
           command.id,
           command.transition === "pin",
+          { currentRuntime: context.runtime },
         );
       }
       return await setSharedModelPublished(
         context.storagePath,
         command.id,
         command.transition === "share",
+        { currentRuntime: context.runtime },
       );
     case "shared-replace":
-      return await replaceSharedModel(context.storagePath, command.id, command.revisionId);
+      return await replaceSharedModel(context.storagePath, command.id, command.revisionId, {
+        currentRuntime: context.runtime,
+      });
     case "shared-target":
-      return await acceptSharedModelRequest(context.storagePath, command.id);
+      return await acceptSharedModelRequest(context.storagePath, command.id, {
+        currentRuntime: context.runtime,
+      });
     case "shared-list":
-      return (await inspectRunProfiles(context.storagePath)).sharedModels;
+      return (await inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime }))
+        .sharedModels;
   }
 }
 

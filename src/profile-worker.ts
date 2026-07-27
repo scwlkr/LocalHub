@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { createServer } from "node:net";
 import type { InstalledModel } from "./model-acquisition.ts";
-import type { ProfileTestObservation, RunProfileRevision } from "./run-profile.ts";
+import {
+  profileLaunchCommand,
+  type ProfileTestObservation,
+  type RunProfileRevision,
+} from "./run-profile.ts";
 
 export interface ProfileWorkerProcess {
   pid: number;
@@ -77,64 +81,14 @@ export function buildProfileWorkerCommand(
   if (JSON.stringify(exactFiles) !== JSON.stringify(revision.modelFiles)) {
     throw new Error("Installed Model hashes do not match the exact Run Profile revision.");
   }
-  const modelFile = model.files.find((file) => file.role === "model");
-  if (!modelFile) throw new Error("Exact Installed Model has no model GGUF file.");
-  const companion = model.files.find((file) => file.role === "companion");
-  const controls = revision.controls;
-  return [
+  return profileLaunchCommand({
     binaryPath,
-    "--model",
-    modelFile.path,
-    ...(companion ? ["--mmproj", companion.path] : []),
-    "--alias",
-    revision.id,
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(port),
-    "--fit",
-    "off",
-    "--ctx-size",
-    String(controls.contextSize),
-    "--parallel",
-    String(controls.parallelSlots),
-    controls.kvUnified ? "--kv-unified" : "--no-kv-unified",
-    "--batch-size",
-    String(controls.batchSize),
-    "--ubatch-size",
-    String(controls.microBatchSize),
-    "--gpu-layers",
-    String(controls.gpuLayers),
-    "--threads",
-    String(controls.threads),
-    "--threads-batch",
-    String(controls.threadsBatch),
-    "--flash-attn",
-    controls.flashAttention,
-    controls.kvOffload ? "--kv-offload" : "--no-kv-offload",
-    "--cache-type-k",
-    controls.cacheTypeK,
-    "--cache-type-v",
-    controls.cacheTypeV,
-    "--load-mode",
-    controls.loadMode,
-    "--split-mode",
-    controls.splitMode,
-    "--main-gpu",
-    String(controls.mainGpu),
-    controls.continuousBatching ? "--cont-batching" : "--no-cont-batching",
-    controls.warmup ? "--warmup" : "--no-warmup",
-    "--metrics",
-    "--slots",
-    "--no-webui",
-    "--no-agent",
-    "--no-ui-mcp-proxy",
-    "--cors-origins",
-    "localhost",
-    "--offline",
-    "--chat-template",
-    revision.chatTemplate,
-  ];
+    revisionId: revision.id,
+    model,
+    port: String(port),
+    controls: revision.controls,
+    chatTemplate: revision.chatTemplate,
+  });
 }
 
 export async function runProfileWorker(
@@ -408,22 +362,19 @@ async function streamedTextProof(
   now: () => number,
 ): Promise<{ outputTokens: number; firstTokenTimeMs: number; throughput: number }> {
   const startedAt = now();
-  const response = await finiteFetch(
-    `${origin}/v1/chat/completions`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: modelAlias,
-        messages: [{ role: "user", content: "Reply with one short greeting." }],
-        max_tokens: 16,
-        temperature: 0,
-        stream: true,
-        stream_options: { include_usage: true },
-      }),
-    },
-    60_000,
-  );
+  const response = await fetch(`${origin}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: modelAlias,
+      messages: [{ role: "user", content: "Reply with one short greeting." }],
+      max_tokens: 16,
+      temperature: 0,
+      stream: true,
+      stream_options: { include_usage: true },
+    }),
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!response.ok || !response.body) {
     throw new Error(`llama.cpp text proof returned HTTP ${response.status}.`);
   }

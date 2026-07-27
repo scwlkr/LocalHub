@@ -48,6 +48,10 @@ test("editing an exact passing Run Profile creates an untested revision and deri
   expect(first.renderedLaunchCommand).toContain("--fit off");
   expect(first.renderedLaunchCommand).toContain("--ctx-size 4096");
   expect(first.renderedLaunchCommand).toContain("--parallel 2");
+  expect(first.renderedLaunchCommand).toContain(`--alias ${first.id}`);
+  expect(first.renderedLaunchCommand).toContain("--no-agent");
+  expect(first.renderedLaunchCommand).toContain("--no-ui-mcp-proxy");
+  expect(first.renderedLaunchCommand).toContain("--offline");
 
   const result = await testRunProfile(
     storagePath,
@@ -152,6 +156,18 @@ test("publish, pin, unshare, share, and replacement are explicit while accepted 
   const model = installedModel();
   const runtime = pinnedRuntime();
   const first = await passingRevision(storagePath, "Members v1", model, runtime, 4096);
+  await expect(
+    publishSharedModel(
+      storagePath,
+      {
+        name: "Too much concurrency",
+        revisionId: first.id,
+        limits: { contextTokens: 2048, outputTokens: 256, concurrentRequests: 3 },
+        capabilities: ["text"],
+      },
+      catalogDependencies(model),
+    ),
+  ).rejects.toThrow("exceed");
   const shared = await publishSharedModel(
     storagePath,
     {
@@ -168,7 +184,9 @@ test("publish, pin, unshare, share, and replacement are explicit while accepted 
     catalogDependencies(model),
   );
 
-  expect((await setSharedModelPin(storagePath, shared.id, true)).pinned).toBeTrue();
+  expect(
+    (await setSharedModelPin(storagePath, shared.id, true, catalogDependencies(model))).pinned,
+  ).toBeTrue();
   expect((await setSharedModelPin(storagePath, shared.id, false)).pinned).toBeFalse();
   expect((await setSharedModelPublished(storagePath, shared.id, false)).published).toBeFalse();
   await expect(
@@ -259,6 +277,9 @@ test("missing, renamed, stale, incompatible, and similarly named substitutes rem
     catalogDependencies(exact, similarlyNamed),
   );
   await expect(
+    setSharedModelPin(storagePath, shared.id, true, catalogDependencies(exact, similarlyNamed)),
+  ).rejects.toThrow("stale");
+  await expect(
     publishSharedModel(
       storagePath,
       {
@@ -278,6 +299,33 @@ test("missing, renamed, stale, incompatible, and similarly named substitutes rem
       catalogDependencies(exact, similarlyNamed),
     ),
   ).rejects.toThrow("currently passing");
+
+  const differentRuntime = {
+    ...runtime,
+    binarySha256: "9".repeat(64),
+  } as RunProfileRuntime;
+  const runtimeLedger = await inspectRunProfiles(storagePath, {
+    ...catalogDependencies(exact, similarlyNamed),
+    currentRuntime: differentRuntime,
+  });
+  expect(runtimeLedger.revisions.find((item) => item.id === edited.id)?.evidenceState).toBe(
+    "Stale",
+  );
+  await expect(
+    publishSharedModel(
+      storagePath,
+      {
+        name: "Wrong runtime attempt",
+        revisionId: edited.id,
+        limits: { contextTokens: 1024, outputTokens: 128, concurrentRequests: 1 },
+        capabilities: ["text"],
+      },
+      {
+        ...catalogDependencies(exact, similarlyNamed),
+        currentRuntime: differentRuntime,
+      },
+    ),
+  ).rejects.toThrow("runtime");
 });
 
 async function passingRevision(

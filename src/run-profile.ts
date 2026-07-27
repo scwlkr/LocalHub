@@ -155,6 +155,7 @@ interface RunProfileState {
 
 export interface RunProfileDependencies {
   inspectModels?: (storagePath: string) => Promise<InstalledModel[]>;
+  currentRuntime?: RunProfileRuntime;
   now?: () => Date;
   randomId?: () => string;
 }
@@ -319,11 +320,17 @@ export async function inspectRunProfiles(
   const models = await (dependencies.inspectModels ?? inspectInstalledModels)(storagePath);
   const revisions = state.revisions.map((revision) => ({
     ...revision,
-    evidenceState: evidenceState(state, revision, models),
+    evidenceState: evidenceState(state, revision, models, dependencies.currentRuntime),
   }));
   const results = state.results.map((result) => ({
     ...result,
-    evidenceState: evidenceState(state, exactRevision(state, result.revisionId), models, result),
+    evidenceState: evidenceState(
+      state,
+      exactRevision(state, result.revisionId),
+      models,
+      dependencies.currentRuntime,
+      result,
+    ),
   }));
   return { revisions, results, sharedModels: state.sharedModels };
 }
@@ -354,7 +361,7 @@ export async function publishSharedModel(
       throw new Error(`Shared Model name is already in use: ${name}`);
     }
     const result = passingResult(state, revision.id);
-    assertLimits(input.limits, result.effective.contextPerSlot);
+    assertLimits(input.limits, result.effective.contextPerSlot, result.effective.slotCount);
     assertExposedCapabilities(input.capabilities, result);
     const timestamp = now(dependencies);
     const shared: SharedModel = {
@@ -384,6 +391,9 @@ export async function setSharedModelPin(
 ): Promise<SharedModel> {
   return await mutateState(storagePath, async (state) => {
     const shared = exactSharedModel(state, sharedModelId);
+    if (pinned) {
+      await currentlyPassingRevision(storagePath, state, shared.revisionId, dependencies);
+    }
     shared.pinned = pinned;
     shared.updatedAt = now(dependencies);
     return structuredClone(shared);
@@ -417,7 +427,7 @@ export async function replaceSharedModel(
     const shared = exactSharedModel(state, sharedModelId);
     const revision = await currentlyPassingRevision(storagePath, state, revisionId, dependencies);
     const result = passingResult(state, revision.id);
-    assertLimits(shared.limits, result.effective.contextPerSlot);
+    assertLimits(shared.limits, result.effective.contextPerSlot, result.effective.slotCount);
     assertExposedCapabilities(shared.capabilities, result);
     shared.revisionId = revision.id;
     shared.updatedAt = now(dependencies);
@@ -461,11 +471,13 @@ function evidenceState(
   state: RunProfileState,
   revision: RunProfileRevision,
   models: InstalledModel[],
+  currentRuntime?: RunProfileRuntime,
   selectedResult?: ProfileResult,
 ): EvidenceState {
   const model = models.find((item) => item.id === revision.modelId);
   if (!model?.available || !sameFiles(revision.modelFiles, model.files)) return "Missing";
   if (latestRevision(state, revision.profileId).id !== revision.id) return "Stale";
+  if (currentRuntime && !sameRuntime(revision.runtime, currentRuntime)) return "Stale";
   const result = selectedResult ?? latestResult(state, revision.id);
   if (!result) return "Untested";
   return result.outcome;
@@ -480,6 +492,11 @@ async function currentlyPassingRevision(
   const revision = exactRevision(state, revisionId);
   if (latestRevision(state, revision.profileId).id !== revision.id) {
     throw new Error(`Run Profile revision ${revision.id} is stale and cannot accept new work.`);
+  }
+  if (dependencies.currentRuntime && !sameRuntime(revision.runtime, dependencies.currentRuntime)) {
+    throw new Error(
+      `Run Profile revision ${revision.id} requires a different exact runtime and is stale in this candidate.`,
+    );
   }
   await exactAvailableModel(storagePath, revision.modelId, dependencies, revision.modelFiles);
   if (latestResult(state, revision.id)?.outcome !== "Passed") {
@@ -551,28 +568,52 @@ function makeRevision(input: {
     ...bound,
     chatTemplate: input.chatTemplate,
     estimates: structuredClone(input.estimates),
-    renderedLaunchCommand: renderLaunch(input.model, input.chatTemplate, input.controls),
+    renderedLaunchCommand: renderLaunch(id, input.model, input.chatTemplate, input.controls),
     createdAt: input.createdAt,
   };
 }
 
 function renderLaunch(
+  revisionId: string,
   model: InstalledModel,
   chatTemplate: string,
   controls: RunProfileControls,
 ): string {
+  return profileLaunchCommand({
+    binaryPath: "$CANDIDATE/runtime/llama.cpp/llama-server",
+    revisionId,
+    model,
+    port: "$PROFILE_PORT",
+    controls,
+    chatTemplate,
+  })
+    .map(shellWord)
+    .join(" ");
+}
+
+export function profileLaunchCommand(input: {
+  binaryPath: string;
+  revisionId: string;
+  model: InstalledModel;
+  port: string;
+  controls: RunProfileControls;
+  chatTemplate: string;
+}): string[] {
+  const { binaryPath, revisionId, model, port, controls, chatTemplate } = input;
   const modelFile = model.files.find((file) => file.role === "model");
   if (!modelFile) throw new Error("Installed Model has no exact model GGUF file.");
   const companion = model.files.find((file) => file.role === "companion");
-  const command = [
-    "$CANDIDATE/runtime/llama.cpp/llama-server",
+  return [
+    binaryPath,
     "--model",
     modelFile.path,
     ...(companion ? ["--mmproj", companion.path] : []),
+    "--alias",
+    revisionId,
     "--host",
     "127.0.0.1",
     "--port",
-    "$PROFILE_PORT",
+    port,
     "--fit",
     "off",
     "--ctx-size",
@@ -608,10 +649,14 @@ function renderLaunch(
     "--metrics",
     "--slots",
     "--no-webui",
+    "--no-agent",
+    "--no-ui-mcp-proxy",
+    "--cors-origins",
+    "localhost",
+    "--offline",
     "--chat-template",
     chatTemplate,
   ];
-  return command.map(shellWord).join(" ");
 }
 
 function observationMismatches(
@@ -675,6 +720,14 @@ function sameFiles(
   return (
     JSON.stringify(expected) ===
     JSON.stringify(actual.map(({ role, sha256 }) => ({ role, sha256 })))
+  );
+}
+
+function sameRuntime(left: RunProfileRuntime, right: RunProfileRuntime): boolean {
+  return (
+    left.build === right.build &&
+    left.commit === right.commit &&
+    left.binarySha256 === right.binarySha256
   );
 }
 
@@ -745,7 +798,7 @@ function assertEstimates(estimates: RunProfileEstimates): void {
   }
 }
 
-function assertLimits(limits: SharedModelLimits, contextPerSlot: number): void {
+function assertLimits(limits: SharedModelLimits, contextPerSlot: number, slotCount: number): void {
   if (
     !Number.isSafeInteger(limits.contextTokens) ||
     limits.contextTokens < 1 ||
@@ -754,7 +807,8 @@ function assertLimits(limits: SharedModelLimits, contextPerSlot: number): void {
     limits.outputTokens < 1 ||
     limits.outputTokens > limits.contextTokens ||
     !Number.isSafeInteger(limits.concurrentRequests) ||
-    limits.concurrentRequests < 1
+    limits.concurrentRequests < 1 ||
+    limits.concurrentRequests > slotCount
   ) {
     throw new Error("Shared Model Member limits exceed the exact passing Profile Result.");
   }
