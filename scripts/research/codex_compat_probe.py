@@ -256,7 +256,7 @@ def provider_command(codex: str, base_url: str, workspace: Path, prompt: str) ->
         "shell_environment_policy.ignore_default_excludes=false",
     ]
     if os.name == "nt":
-        settings.append('windows.sandbox="unelevated"')
+        settings.append('windows.sandbox="elevated"')
     command = [
         codex,
         "exec",
@@ -369,6 +369,27 @@ def fake_suite(codex: str) -> dict[str, Any]:
         member.mkdir()
         host.mkdir()
 
+        windows_sandbox_setup: dict[str, Any] | None = None
+        if os.name == "nt":
+            isolated_codex_home = root / "codex-home"
+            isolated_codex_home.mkdir(exist_ok=True)
+            setup_env = {key: value for key, value in os.environ.items() if not key.startswith("CODEX_")}
+            setup_env["CODEX_HOME"] = str(isolated_codex_home)
+            setup = subprocess.run(
+                [codex, "sandbox", "setup", "--elevated", "--current-user"],
+                env=setup_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=120,
+                check=False,
+            )
+            windows_sandbox_setup = {
+                "exit_zero": setup.returncode == 0,
+                "stdout_excerpt": setup.stdout[:500],
+                "stderr_excerpt": setup.stderr[:500],
+            }
+
         if os.name == "nt":
             member_command = 'python -c "open(\'member-marker.txt\', \'w\').write(\'member-only\')"'
             outside_path = (outside / "outside-marker.txt").as_posix()
@@ -412,6 +433,7 @@ def fake_suite(codex: str) -> dict[str, Any]:
             "codex_version": subprocess.run(
                 [codex, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False
             ).stdout.strip(),
+            "windows_sandbox_setup": windows_sandbox_setup,
             "config_and_auth_byte_identical": before == after,
             "normal_codex_state_present": {
                 "config": before["config"] is not None,
@@ -579,6 +601,8 @@ def main() -> int:
             result["context_failure"]["error_surfaced"],
             all(result["cancellation"].values()),
         ]
+        if os.name == "nt":
+            assertions.append(result["windows_sandbox_setup"]["exit_zero"])
         return 0 if all(assertions) else 1
     return 0
 
