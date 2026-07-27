@@ -21,10 +21,14 @@ jobs:
       - name: Download pinned Codex
         shell: pwsh
         run: |
-          $codexPath = Join-Path $env:RUNNER_TEMP "codex.exe"
+          $codexArchive = Join-Path $env:RUNNER_TEMP "codex-package.tar.gz"
+          $codexDirectory = Join-Path $env:RUNNER_TEMP "codex-package"
+          New-Item -ItemType Directory -Path $codexDirectory | Out-Null
           Invoke-WebRequest `
-            -Uri "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-x86_64-pc-windows-msvc.exe" `
-            -OutFile $codexPath
+            -Uri "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-package-x86_64-pc-windows-msvc.tar.gz" `
+            -OutFile $codexArchive
+          tar -xzf $codexArchive -C $codexDirectory
+          $codexPath = Join-Path $codexDirectory "bin\codex.exe"
           & $codexPath --version
           "CODEX_EXE=$codexPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
