@@ -87,7 +87,7 @@ async function collectEnvironment(seam: EvidenceSeam): Promise<EvidenceEnvironme
     browsers: [],
     networkLane:
       seam === "assembled-release"
-        ? "Physical Mac local candidate smoke"
+        ? "macOS arm64 assembled candidate smoke"
         : "Controlled external dependency seam",
     modelVariantHashes: [],
     companionHashes: [],
