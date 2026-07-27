@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   createMemberBinding,
   createMemberGatewayHandler,
+  isEligibleLanInterface,
   isPeerOnSelectedSubnet,
   reconcileMemberBinding,
 } from "../src/member-gateway.ts";
@@ -72,6 +73,51 @@ test("Member binding refuses public, loopback, wildcard, stale, or silently subs
   ).rejects.toThrow("changed");
 });
 
+test("Member binding rejects RFC 1918 VPN, tunnel, PPP, and virtual bridge interfaces", async () => {
+  for (const name of [
+    "utun4",
+    "tun0",
+    "tap2",
+    "ppp0",
+    "ipsec0",
+    "wg0",
+    "tailscale0",
+    "awdl0",
+    "llw0",
+    "bridge0",
+    "vmnet8",
+    "vmenet0",
+    "docker0",
+    "podman0",
+  ]) {
+    const tunneled = { name, address: "10.9.0.2", netmask: "255.255.0.0" };
+    expect(isEligibleLanInterface(tunneled)).toBe(false);
+    await expect(
+      createMemberBinding({
+        selected: tunneled,
+        available: [tunneled],
+        bonjourName: "localhub-test.local",
+        port: 39283,
+      }),
+    ).rejects.toThrow("VPN");
+  }
+  expect(isEligibleLanInterface(selected)).toBe(true);
+});
+
+test("Member binding rejects malformed, non-contiguous, and host-only netmasks", async () => {
+  for (const netmask of ["255.0.255.0", "255.255.255.1", "255.255.255.255", "no-mask"]) {
+    const invalid = { ...selected, netmask };
+    await expect(
+      createMemberBinding({
+        selected: invalid,
+        available: [invalid],
+        bonjourName: "localhub-test.local",
+        port: 39283,
+      }),
+    ).rejects.toThrow("netmask");
+  }
+});
+
 test("Member listener accepts only the selected subnet and exposes no Host routes", async () => {
   const binding = await createMemberBinding({
     selected,
@@ -91,7 +137,19 @@ test("Member listener accepts only the selected subnet and exposes no Host route
   );
   expect(page.status).toBe(200);
   expect(page.headers.get("content-security-policy")).toContain("default-src 'self'");
-  expect(await page.text()).toContain("passing Shared Model is still required");
+  expect(page.headers.get("content-security-policy")).toContain("style-src 'self'");
+  const pageText = await page.text();
+  expect(pageText).toContain("passing Shared Model is still required");
+  expect(pageText).toContain('href="/localhub.css"');
+  expect(pageText).not.toContain("<style>");
+
+  const stylesheet = await allowed(
+    new Request("http://192.168.50.20:39283/localhub.css", {
+      headers: { host: "192.168.50.20:39283" },
+    }),
+  );
+  expect(stylesheet.status).toBe(200);
+  expect(stylesheet.headers.get("content-type")).toContain("text/css");
 
   const hostRoute = await allowed(
     new Request("http://192.168.50.20:39283/stop", {
@@ -107,6 +165,33 @@ test("Member listener accepts only the selected subnet and exposes no Host route
     }),
   );
   expect(malformedOrigin.status).toBe(403);
+
+  const wrongScheme = await allowed(
+    new Request("http://192.168.50.20:39283/", {
+      headers: { host: "192.168.50.20:39283", origin: "https://192.168.50.20:39283" },
+    }),
+  );
+  expect(wrongScheme.status).toBe(403);
+
+  const friendlyHostWithIpv4Origin = await allowed(
+    new Request("http://192.168.50.20:39283/", {
+      headers: {
+        host: "localhub-test.local:39283",
+        origin: "http://192.168.50.20:39283",
+      },
+    }),
+  );
+  expect(friendlyHostWithIpv4Origin.status).toBe(403);
+
+  const ipv4HostWithFriendlyOrigin = await allowed(
+    new Request("http://192.168.50.20:39283/", {
+      headers: {
+        host: "192.168.50.20:39283",
+        origin: "http://localhub-test.local:39283",
+      },
+    }),
+  );
+  expect(ipv4HostWithFriendlyOrigin.status).toBe(403);
 
   const wrongSubnet = createMemberGatewayHandler(binding, () => "192.168.51.99");
   const denied = await wrongSubnet(

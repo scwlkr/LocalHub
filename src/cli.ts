@@ -209,7 +209,20 @@ export async function main(
       dependencies.runStateDirectory ?? defaultRunStateDirectory(dependencies.env ?? process.env);
     try {
       const member = await (dependencies.recheckMember ?? recheckMemberLink)(stateDirectory);
-      console.log(JSON.stringify({ action: "member-recheck", member }, null, 2));
+      console.log(
+        JSON.stringify(
+          {
+            action: "member-recheck",
+            member,
+            next:
+              member.health === "ready"
+                ? "Physical friendly and IPv4 verification passed."
+                : "Open both displayed links from one physical device, then run `lh member recheck` again.",
+          },
+          null,
+          2,
+        ),
+      );
       return 0;
     } catch (error) {
       renderRunFailure(error);

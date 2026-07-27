@@ -41,6 +41,7 @@ const MEMBER_CSP = [
   "default-src 'self'",
   "connect-src 'self'",
   "img-src 'self' data: blob:",
+  "style-src 'self'",
   "object-src 'none'",
   "frame-src 'none'",
   "frame-ancestors 'none'",
@@ -48,19 +49,27 @@ const MEMBER_CSP = [
   "base-uri 'none'",
 ].join("; ");
 
+const NON_LAN_INTERFACE =
+  /^(?:utun|tun|tap|ppp|ipsec|wg|tailscale|zerotier|zt|gif|stf|awdl|llw|bridge|vmnet|vmenet|docker|podman)\d*/i;
+
 export async function createMemberBinding(
   options: CreateMemberBindingOptions,
 ): Promise<MemberBinding> {
   assertPort(options.port);
-  if (!isPrivateIpv4(options.selected.address)) {
-    throw new Error("The selected Member interface must have one RFC 1918 private IPv4 address.");
+  if (!isUsableLanNetmask(options.selected.netmask)) {
+    throw new Error("The selected Member interface has a malformed or non-LAN IPv4 netmask.");
   }
-  parseIpv4(options.selected.netmask, "selected interface netmask");
+  if (!isEligibleLanInterface(options.selected)) {
+    throw new Error(
+      "The selected Member interface must be one RFC 1918 LAN interface, not loopback, public, link-local, VPN, tunnel, or PPP.",
+    );
+  }
   const current = options.available.find(
     (item) =>
       item.name === options.selected.name &&
       item.address === options.selected.address &&
-      item.netmask === options.selected.netmask,
+      item.netmask === options.selected.netmask &&
+      isEligibleLanInterface(item),
   );
   if (!current) {
     throw new Error(
@@ -81,6 +90,26 @@ export async function createMemberBinding(
     qrSvg: qr.svg,
     qrAscii: qr.ascii,
   };
+}
+
+export function isEligibleLanInterface(value: PrivateInterface): boolean {
+  return (
+    value.name.length > 0 &&
+    !NON_LAN_INTERFACE.test(value.name) &&
+    isPrivateIpv4(value.address) &&
+    isUsableLanNetmask(value.netmask)
+  );
+}
+
+export function isUsableLanNetmask(value: string): boolean {
+  try {
+    const mask = ipv4Integer(value);
+    if (mask === 0 || mask === 0xffffffff) return false;
+    const inverted = ~mask >>> 0;
+    return (inverted & (inverted + 1)) === 0;
+  } catch {
+    return false;
+  }
 }
 
 export function isPrivateIpv4(address: string): boolean {
@@ -138,7 +167,9 @@ export function reconcileMemberBinding(
 export function createMemberGatewayHandler(
   binding: MemberBinding,
   peerAddress: (request: Request) => string | null,
-  onVisit: (route: "friendly" | "ipv4", peerAddress: string) => void = () => undefined,
+  onVisit: (route: "friendly" | "ipv4", peerAddress: string) => void | Promise<void> = () =>
+    undefined,
+  readiness: () => "ready" | "verification-required" = () => "ready",
 ): (request: Request) => Promise<Response> {
   const allowedHosts = new Map([
     [`${binding.bonjourName}:${binding.port}`.toLowerCase(), "friendly" as const],
@@ -157,7 +188,14 @@ export function createMemberGatewayHandler(
     const origin = request.headers.get("origin");
     if (origin) {
       try {
-        if (!allowedHosts.has(new URL(origin).host.toLowerCase())) {
+        const parsed = new URL(origin);
+        const expectedOrigin = route === "friendly" ? binding.friendlyUrl : binding.ipv4Url;
+        if (
+          parsed.protocol !== "http:" ||
+          parsed.username !== "" ||
+          parsed.password !== "" ||
+          parsed.origin.toLowerCase() !== expectedOrigin.toLowerCase()
+        ) {
           return memberResponse("Cross-origin Member request denied.", { status: 403 });
         }
       } catch {
@@ -165,9 +203,14 @@ export function createMemberGatewayHandler(
       }
     }
     const path = new URL(request.url).pathname;
+    if (request.method === "GET" && path === "/localhub.css") {
+      return memberResponse(renderStylesheet(), {
+        headers: { "content-type": "text/css; charset=utf-8" },
+      });
+    }
     if (request.method === "GET" && (path === "/" || path === "/readiness")) {
-      onVisit(route, peer);
-      return memberResponse(renderMemberPage(), {
+      await onVisit(route, peer);
+      return memberResponse(renderMemberPage(readiness()), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }
@@ -177,20 +220,44 @@ export function createMemberGatewayHandler(
 
 export function renderHostDashboard(
   binding: MemberBinding | null,
-  run: { runId?: string; status: string; acceptingWork: boolean },
+  run: {
+    runId?: string;
+    status: string;
+    acceptingWork: boolean;
+    member?: {
+      health: "ready" | "closed" | "recheck-required";
+      failure: {
+        cause: string;
+        protectedState: string;
+        stillWorks: string;
+        repair: string;
+        recheck: string;
+      } | null;
+    } | null;
+  },
 ): string {
   const link = binding
     ? `<p><strong>Member Link</strong><br><a href="${escapeHtml(binding.friendlyUrl)}">${escapeHtml(binding.friendlyUrl)}</a><br><a href="${escapeHtml(binding.ipv4Url)}">${escapeHtml(binding.ipv4Url)}</a></p><div class="qr">${binding.qrSvg}</div><p>Same trusted local network only. The QR contains the private IPv4 fallback and was generated locally.</p>`
     : "<p>The Member Link is closed until the selected private interface passes recheck.</p>";
+  const verification =
+    run.member?.health === "recheck-required" && run.member.failure
+      ? `<section><h2>Member verification pending</h2><p>No Member-ready claim is active until one physical device opens both exact links.</p><p><strong>Cause:</strong> ${escapeHtml(run.member.failure.cause)}<br><strong>Protected state:</strong> ${escapeHtml(run.member.failure.protectedState)}<br><strong>Still works:</strong> ${escapeHtml(run.member.failure.stillWorks)}<br><strong>Repair:</strong> ${escapeHtml(run.member.failure.repair)}<br><strong>Recheck:</strong> ${escapeHtml(run.member.failure.recheck)}</p></section>`
+      : "";
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LocalHub Host</title><style>${baseCss()}</style></head>
-<body><main><p class="eyebrow">LOCALHUB HOST</p><h1>${escapeHtml(run.status)}</h1><p>New work: ${run.acceptingWork ? "accepted" : "rejected"}</p>${link}<section><h2>Ready means the Host is available</h2><p>A passing Shared Model is still required before Members can run inference.</p></section>${run.runId ? `<form method="post" action="/stop?run-id=${encodeURIComponent(run.runId)}"><button type="submit">Stop LocalHub</button></form><p>Stop rejects new work and closes the Member Link and LocalHub-owned services. It does not delete models or uninstall LocalHub.</p>` : ""}</main></body></html>`;
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LocalHub Host</title><link rel="stylesheet" href="/localhub.css"></head>
+<body><main><p class="eyebrow">LOCALHUB HOST</p><h1>${escapeHtml(run.status)}</h1><p>New work: ${run.acceptingWork ? "accepted" : "rejected"}</p>${link}${verification}<section><h2>Ready means the Host is available</h2><p>A passing Shared Model is still required before Members can run inference.</p></section>${run.runId ? `<form method="post" action="/stop?run-id=${encodeURIComponent(run.runId)}"><button type="submit">Stop LocalHub</button></form><p>Stop rejects new work and closes the Member Link and LocalHub-owned services. It does not delete models or uninstall LocalHub.</p>` : ""}</main></body></html>`;
 }
 
-function renderMemberPage(): string {
+function renderMemberPage(readiness: "ready" | "verification-required"): string {
+  const heading =
+    readiness === "ready" ? "Member Link ready" : "Member Link reachable for verification";
+  const status =
+    readiness === "ready"
+      ? "This page is available only on the Host-selected trusted local network."
+      : "The Host has not claimed Member readiness. Open both exact links from this physical device, then recheck on the Host.";
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LocalHub Member</title><style>${baseCss()}</style></head>
-<body><main><p class="eyebrow">LOCALHUB MEMBER</p><h1>Member Link ready</h1><p>This page is available only on the Host-selected trusted local network.</p><section><h2>No model is available yet</h2><p>An exact acquired, tested, shared, and passing Shared Model is still required before inference is available.</p></section><p>Host controls, files, shell, and private-network tools are not available here.</p></main></body></html>`;
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LocalHub Member</title><link rel="stylesheet" href="/localhub.css"></head>
+<body><main><p class="eyebrow">LOCALHUB MEMBER</p><h1>${heading}</h1><p>${status}</p><section><h2>No model is available yet</h2><p>An exact acquired, tested, shared, and passing Shared Model is still required before inference is available.</p></section><p>Host controls, files, shell, and private-network tools are not available here.</p></main></body></html>`;
 }
 
 function memberResponse(body: string, init: ResponseInit = {}): Response {
@@ -265,6 +332,6 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#039;");
 }
 
-function baseCss(): string {
+export function renderStylesheet(): string {
   return "*{box-sizing:border-box}body{margin:0;background:#071014;color:#eafcff;font:18px/1.55 system-ui,sans-serif}main{max-width:48rem;margin:auto;padding:clamp(1.5rem,7vw,5rem)}h1{font-size:clamp(2.4rem,8vw,5rem);line-height:1;margin:.2em 0}h2{font-size:1.25rem}a{color:#39e7ff}.eyebrow{color:#39e7ff;letter-spacing:.18em;font-weight:700}section{border-left:.3rem solid #39e7ff;padding:.1rem 1.2rem;margin:2rem 0}.qr{max-width:18rem;background:white;padding:.75rem}.qr svg{display:block;width:100%;height:auto}button{background:#39e7ff;border:0;border-radius:.35rem;color:#071014;font:inherit;font-weight:800;padding:.75rem 1rem}:focus-visible{outline:.2rem solid #fff;outline-offset:.2rem}@media(max-width:30rem){body{font-size:16px}}";
 }

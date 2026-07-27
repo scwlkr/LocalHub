@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmod, mkdir, stat, statfs } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { lstat, mkdir, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConsoleSetupIO } from "./setup.ts";
+import { fileIdentity } from "./release.ts";
 import {
   buildLlamaLaunch,
   currentPrivateInterfaces,
@@ -38,6 +40,7 @@ export function defaultModelStoragePath(): string {
 export function createNativeGuidedDependencies(
   options: NativeGuidedDependenciesOptions,
 ): GuidedFirstRunDependencies {
+  const memberDeadlineMs = options.memberReadinessDeadlineMs ?? 300_000;
   return {
     io: createConsoleSetupIO(),
     observeHost: observeHostComputer,
@@ -45,11 +48,11 @@ export function createNativeGuidedDependencies(
     verifyRuntime: (modelStorage) => verifyPinnedRuntime(options.bundle, modelStorage),
     currentInterfaces: currentPrivateInterfaces,
     resolveBonjourName,
-    verifyPhysicalMember: (binding) =>
-      verifyPhysicalMember(binding, options.memberReadinessDeadlineMs ?? 300_000),
+    verifyPhysicalMember: (binding) => verifyPhysicalMember(binding, memberDeadlineMs),
     startRun: async (modelsDirectory, member) => {
       const run = await startLocalHubRun({
         ...options.run,
+        startupDeadlineMs: memberDeadlineMs,
         modelsDirectory,
         member: {
           interface: member.interface,
@@ -114,20 +117,36 @@ export async function prepareModelStorage(
   requestedPath: string,
 ): Promise<{ path: string; freeBytes: number }> {
   const path = resolve(requestedPath);
-  let exists = true;
+  let root: Stats;
   try {
-    const current = await stat(path);
-    if (!current.isDirectory())
-      throw new Error("The confirmed Model Storage path is not a folder.");
+    root = await lstat(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    exists = false;
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    root = await lstat(path);
   }
-  if (!exists) await mkdir(path, { recursive: true, mode: 0o700 });
+  if (root.isSymbolicLink()) {
+    throw new Error("The confirmed Model Storage path must not be a symbolic link.");
+  }
+  if (!root.isDirectory()) {
+    throw new Error("The confirmed Model Storage path is not a folder.");
+  }
   for (const name of [".localhub-catalog", ".localhub-staging"]) {
     const managed = join(path, name);
-    await mkdir(managed, { recursive: true, mode: 0o700 });
-    await chmod(managed, 0o700);
+    let entry: Stats;
+    try {
+      entry = await lstat(managed);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await mkdir(managed, { mode: 0o700 });
+      entry = await lstat(managed);
+    }
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Managed Model Storage path ${name} must not be a symbolic link.`);
+    }
+    if (!entry.isDirectory()) {
+      throw new Error(`Managed Model Storage path ${name} is not a folder.`);
+    }
   }
   const storage = await statfs(path);
   return { path, freeBytes: storage.bavail * storage.bsize };
@@ -139,6 +158,13 @@ export async function verifyPinnedRuntime(
   deadlineMs = 30_000,
 ): Promise<GuidedRuntimeResult> {
   const deadline = Date.now() + deadlineMs;
+  const actualBinary = await fileIdentity(bundle.llama.binaryPath);
+  if (
+    actualBinary.size !== bundle.llama.binary.size ||
+    actualBinary.sha256 !== bundle.llama.binary.sha256
+  ) {
+    throw new Error("Pinned llama.cpp binary identity changed after candidate verification.");
+  }
   const version = await runFinite([bundle.llama.binaryPath, "--version"], remaining(deadline));
   if (!/version:\s*10107\b/.test(version) || !version.includes("c0bc8591e")) {
     throw new Error("Pinned llama.cpp did not report build b10107 at c0bc8591e.");
@@ -204,6 +230,7 @@ export async function verifyPinnedRuntime(
   return {
     build: "b10107",
     architecture: "arm64",
+    binary: bundle.llama.binary,
     devices,
     emptyRouterProcessLaunch: "passed",
     health: "passed",
@@ -234,6 +261,7 @@ export async function verifyPhysicalMember(
       const normalized = peer.startsWith("::ffff:") ? peer.slice(7) : peer;
       if (normalized !== binding.interface.address) visited[route] = true;
     },
+    () => "verification-required",
   );
   server = Bun.serve({
     hostname: binding.interface.address,
@@ -244,9 +272,14 @@ export async function verifyPhysicalMember(
     await server?.stop(true);
     throw error;
   });
+  let publicationFailure: Error | null = null;
+  void publication.exited.then((failure) => {
+    publicationFailure = failure;
+  });
   try {
     const deadline = Date.now() + deadlineMs;
     while (Date.now() < deadline) {
+      if (publicationFailure) throw publicationFailure;
       const network = reconcileMemberBinding(binding, currentPrivateInterfaces());
       if (network.status === "withdrawn") throw new Error(network.failure.cause);
       if (visited.friendly && visited.ipv4)

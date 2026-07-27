@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { main } from "../src/cli.ts";
@@ -8,13 +10,21 @@ import {
   buildSupervisorLaunch,
   currentPrivateInterfaces,
   inspectLocalHubRun,
+  publishBonjourService,
+  readRunState,
   serveLocalHubRun,
+  startLocalHubRun,
   stopLocalHubRun,
   writeRunState,
   type LocalHubRunState,
   type RunBundle,
 } from "../src/run.ts";
-import { createMemberBinding } from "../src/member-gateway.ts";
+import {
+  createMemberBinding,
+  isPeerOnSelectedSubnet,
+  type MemberBinding,
+  type PrivateInterface,
+} from "../src/member-gateway.ts";
 
 const testRoots: string[] = [];
 const macOSProcessTest = process.platform === "darwin" ? test : test.skip;
@@ -243,6 +253,40 @@ test("status rejects malformed or non-loopback state before network access", asy
   expect(requests).toBe(0);
 });
 
+test("persisted Member state rejects public or VPN interfaces, unsafe ports, and mismatched URLs", async () => {
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  await mkdir(stateDirectory, { recursive: true });
+  const base = runningState();
+  const member = {
+    interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
+    bonjourName: "localhub-test.local",
+    port: 39283,
+    friendlyUrl: "http://localhub-test.local:39283",
+    ipv4Url: "http://192.168.50.20:39283",
+    listener: "192.168.50.20:39283",
+    health: "ready" as const,
+    bonjourPublished: true,
+    failure: null,
+  };
+  const malformed = [
+    { ...member, interface: { ...member.interface, name: "utun4", address: "10.9.0.2" } },
+    { ...member, interface: { ...member.interface, address: "203.0.113.8" } },
+    { ...member, interface: { ...member.interface, netmask: "255.0.255.0" } },
+    { ...member, port: 80 },
+    { ...member, friendlyUrl: "https://localhub-test.local:39283" },
+    { ...member, listener: "192.168.50.20:40000" },
+  ];
+
+  for (const value of malformed) {
+    await writeFile(
+      join(stateDirectory, "run-state.json"),
+      JSON.stringify({ ...base, member: value }),
+    );
+    await expect(readRunState(stateDirectory)).rejects.toThrow("unsafe");
+  }
+});
+
 test("stop preserves a failed Host when its recorded identity is not proven", async () => {
   const root = await isolatedRoot();
   const stateDirectory = join(root, "state");
@@ -365,6 +409,50 @@ test("a timed-out stop never signals a process without a fresh ownership proof",
   expect(await readFile(join(stateDirectory, "run-state.json"), "utf8")).toContain(
     '"status": "running"',
   );
+});
+
+macOSProcessTest("Bonjour cleanup fails closed when dns-sd exit cannot be proven", async () => {
+  const binding = await createMemberBinding({
+    selected: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
+    available: [{ name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" }],
+    bonjourName: "localhub-test.local",
+    port: 39283,
+  });
+  const signals: string[] = [];
+  const events = new EventEmitter();
+  const child = Object.assign(events, {
+    exitCode: null,
+    signalCode: null,
+    kill(signal: string) {
+      signals.push(signal);
+      return true;
+    },
+  }) as unknown as ChildProcess;
+  queueMicrotask(() => events.emit("spawn"));
+  let spawnedCommand: string | undefined;
+  let spawnedArguments: readonly string[] | undefined;
+  const publication = await publishBonjourService(binding, {
+    spawn: ((command: string, arguments_: readonly string[]) => {
+      spawnedCommand = command;
+      spawnedArguments = arguments_;
+      return child;
+    }) as typeof import("node:child_process").spawn,
+    sleep: async () => undefined,
+    waitForExit: async () => false,
+  });
+
+  await expect(publication.stop()).rejects.toThrow("could not prove dns-sd exit");
+  expect(spawnedCommand).toBe("/usr/bin/dns-sd");
+  expect(spawnedArguments).toEqual([
+    "-i",
+    "en0",
+    "-R",
+    "LocalHub",
+    "_http._tcp",
+    "local.",
+    "39283",
+  ]);
+  expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
 });
 
 macOSProcessTest("listener ownership inspection ignores a hostile PATH lsof", async () => {
@@ -504,7 +592,7 @@ macOSProcessTest(
     const failed = await waitForState(stateDirectory, "failed");
     expect(failed.failure).toMatchObject({
       protectedState: expect.stringContaining("No model"),
-      repair: expect.stringContaining("pinned llama.cpp runtime"),
+      repair: expect.stringContaining("reported runtime"),
       recheck: "Run `lh run start`, then `lh run status`.",
     });
     expect(failed.restartAttempts).toBe(0);
@@ -550,6 +638,13 @@ macOSProcessTest("mDNS publication failure closes the selected-interface gateway
 
   const failed = await waitForState(stateDirectory, "failed");
   expect(failed.member).toMatchObject({ health: "closed", bonjourPublished: false });
+  expect(failed.failure).toMatchObject({
+    cause: expect.stringContaining("controlled mDNS publication failure"),
+    protectedState: expect.any(String),
+    stillWorks: expect.any(String),
+    repair: expect.any(String),
+    recheck: expect.any(String),
+  });
   await expect(fetch(member.ipv4Url)).rejects.toThrow();
 });
 
@@ -577,6 +672,8 @@ macOSProcessTest(
     });
     let visibleInterfaces = [selected];
     let publicationStops = 0;
+    let observedTime = 0;
+    const physicalPeer = physicalPeerFor(selected);
     const supervisor = serveLocalHubRun({
       bundle: bundle(fakeLlama),
       hostPort,
@@ -587,7 +684,11 @@ macOSProcessTest(
       member: binding,
       currentInterfaces: () => visibleInterfaces,
       memberCheckIntervalMs: 10,
+      memberWakeGapMs: 50,
+      now: () => observedTime,
+      memberPeerAddress: () => physicalPeer,
       publishBonjour: async () => ({
+        exited: new Promise<Error | null>(() => undefined),
         async stop() {
           publicationStops += 1;
         },
@@ -595,10 +696,80 @@ macOSProcessTest(
     });
     const running = await waitForState(stateDirectory, "running");
     try {
-      const initial = await fetch(binding.ipv4Url, {
+      expect(running.member).toMatchObject({ health: "recheck-required" });
+      await expect(
+        startLocalHubRun({
+          buildCommit: running.commit,
+          candidateRecordPath: "/not-used-for-existing-run",
+          executablePath: "/not-used-for-existing-run",
+          stateDirectory,
+          startupDeadlineMs: 20,
+          member: {
+            interface: binding.interface,
+            bonjourName: binding.bonjourName,
+            port: binding.port,
+          },
+        }),
+      ).rejects.toThrow("physical Member verification is still pending");
+      const afterTimeout = await readRunState(stateDirectory);
+      expect(afterTimeout?.runId).toBe(running.runId);
+      expect(afterTimeout?.supervisor.pid).toBe(running.supervisor.pid);
+      expect(afterTimeout?.member?.health).toBe("recheck-required");
+
+      const pendingDashboard = await fetch(running.host.origin).then((response) => response.text());
+      expect(pendingDashboard).toContain("Member verification pending");
+      expect(pendingDashboard).toContain("Cause:");
+      expect(pendingDashboard).toContain("Protected state:");
+      expect(pendingDashboard).toContain("Repair:");
+      expect(pendingDashboard).toContain("Recheck:");
+      const pendingMember = await fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.friendlyUrl).host },
+      }).then((response) => response.text());
+      expect(pendingMember).toContain("reachable for verification");
+      expect(pendingMember).not.toContain("Member Link ready");
+      const resumed = startLocalHubRun({
+        buildCommit: running.commit,
+        candidateRecordPath: "/not-used-for-existing-run",
+        executablePath: "/not-used-for-existing-run",
+        stateDirectory,
+        startupDeadlineMs: 500,
+        member: {
+          interface: binding.interface,
+          bonjourName: binding.bonjourName,
+          port: binding.port,
+        },
+      });
+      await fetch(binding.ipv4Url, {
         headers: { host: new URL(binding.ipv4Url).host },
       });
-      expect(initial.status).toBe(200);
+      const resumedRun = await resumed;
+      expect(resumedRun.runId).toBe(running.runId);
+      expect(resumedRun.supervisor.pid).toBe(running.supervisor.pid);
+
+      const dashboard = await fetch(running.host.origin);
+      const dashboardText = await dashboard.text();
+      expect(dashboard.status).toBe(200);
+      expect(dashboardText).toContain('href="/localhub.css"');
+      expect(dashboardText).not.toContain("<style>");
+      expect(
+        await fetch(`${running.host.origin}/localhub.css`).then((response) => response.status),
+      ).toBe(200);
+      expect(
+        await fetch(running.host.origin, { headers: { host: "attacker.invalid" } }).then(
+          (response) => response.status,
+        ),
+      ).toBe(421);
+      expect(
+        await fetch(`${running.host.origin}/stop?run-id=${running.runId}`, {
+          method: "POST",
+        }).then((response) => response.status),
+      ).toBe(409);
+      expect(
+        await fetch(`${running.host.origin}/stop?run-id=${running.runId}`, {
+          method: "POST",
+          headers: { origin: "https://attacker.invalid" },
+        }).then((response) => response.status),
+      ).toBe(409);
 
       visibleInterfaces = [];
       const withdrawn = await waitForMemberHealth(stateDirectory, "recheck-required");
@@ -609,22 +780,48 @@ macOSProcessTest(
         recheck: expect.stringContaining("recheck"),
       });
       await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+      expect(await fetch(running.host.origin).then((response) => response.text())).not.toContain(
+        binding.ipv4Url,
+      );
 
       visibleInterfaces = [selected];
       const rechecked = await fetch(`${running.host.origin}/member/recheck`, {
         method: "POST",
         headers: { "x-localhub-run-id": running.runId },
       });
-      expect(rechecked.status).toBe(200);
+      expect(rechecked.status).toBe(202);
       expect((await rechecked.json()) as object).toMatchObject({
-        status: "ready",
-        member: { health: "ready", bonjourPublished: true },
+        status: "physical-verification-required",
+        member: { health: "recheck-required", bonjourPublished: true },
       });
-      expect(
-        await fetch(binding.ipv4Url, {
-          headers: { host: new URL(binding.ipv4Url).host },
-        }).then((response) => response.status),
-      ).toBe(200);
+      await fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.friendlyUrl).host },
+      });
+      expect((await readRunState(stateDirectory))?.member?.health).toBe("recheck-required");
+      await fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.ipv4Url).host },
+      });
+      await waitForMemberHealth(stateDirectory, "ready");
+
+      observedTime = 100;
+      const woke = await waitForMemberHealth(stateDirectory, "recheck-required");
+      expect(woke.member?.failure).toMatchObject({
+        cause: expect.stringContaining("wake or timer suspension"),
+        protectedState: expect.stringContaining("closed"),
+        repair: expect.any(String),
+        recheck: expect.stringContaining("recheck"),
+      });
+      await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+
+      const wakeRecheck = await fetch(`${running.host.origin}/member/recheck`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+      expect(wakeRecheck.status).toBe(202);
+      await provePhysicalMember(binding);
+      await waitForMemberHealth(stateDirectory, "ready");
+      await Bun.sleep(30);
+      expect((await readRunState(stateDirectory))?.member?.health).toBe("ready");
     } finally {
       await fetch(`${running.host.origin}/stop`, {
         method: "POST",
@@ -635,8 +832,209 @@ macOSProcessTest(
 
     const stopped = await waitForState(stateDirectory, "stopped");
     expect(stopped.member).toMatchObject({ health: "closed", bonjourPublished: false });
-    expect(publicationStops).toBe(2);
+    expect(publicationStops).toBe(3);
     await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+  },
+);
+
+macOSProcessTest("late Bonjour failure withdraws an already-verified Member Link", async () => {
+  const selected = currentPrivateInterfaces()[0];
+  if (!selected) throw new Error("The supported macOS test lane has no private interface.");
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  const runtimeDirectory = join(root, "runtime");
+  await mkdir(runtimeDirectory, { recursive: true });
+  const fakeLlama = join(runtimeDirectory, "llama-server");
+  await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+  const [hostPort, llamaPort, memberPort] = await Promise.all([
+    availablePort(),
+    availablePort(),
+    availablePortOn(selected.address),
+  ]);
+  const binding = await createMemberBinding({
+    selected,
+    available: [selected],
+    bonjourName: "localhub-test.local",
+    port: memberPort,
+  });
+  let failBonjour!: (failure: Error | null) => void;
+  let publicationStops = 0;
+  const supervisor = serveLocalHubRun({
+    bundle: bundle(fakeLlama),
+    hostPort,
+    llamaPort,
+    stateDirectory,
+    startupDeadlineMs: 2_000,
+    stopDeadlineMs: 500,
+    member: binding,
+    currentInterfaces: () => [selected],
+    memberPeerAddress: () => physicalPeerFor(selected),
+    publishBonjour: async () => ({
+      exited: new Promise<Error | null>((resolve) => {
+        failBonjour = resolve;
+      }),
+      async stop() {
+        publicationStops += 1;
+      },
+    }),
+  });
+  const running = await waitForState(stateDirectory, "running");
+  try {
+    await provePhysicalMember(binding);
+    await waitForMemberHealth(stateDirectory, "ready");
+    failBonjour(new Error("controlled late dns-sd exit"));
+    const withdrawn = await waitForMemberHealth(stateDirectory, "recheck-required");
+    expect(withdrawn.member?.failure?.cause).toContain("controlled late dns-sd exit");
+    expect(publicationStops).toBe(1);
+    await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+  } finally {
+    await fetch(`${running.host.origin}/stop`, {
+      method: "POST",
+      headers: { "x-localhub-run-id": running.runId },
+    });
+    await supervisor;
+  }
+});
+
+macOSProcessTest(
+  "an in-flight physical visit cannot restore readiness after Bonjour withdrawal",
+  async () => {
+    const selected = currentPrivateInterfaces()[0];
+    if (!selected) throw new Error("The supported macOS test lane has no private interface.");
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+    const [hostPort, llamaPort, memberPort] = await Promise.all([
+      availablePort(),
+      availablePort(),
+      availablePortOn(selected.address),
+    ]);
+    const binding = await createMemberBinding({
+      selected,
+      available: [selected],
+      bonjourName: "localhub-test.local",
+      port: memberPort,
+    });
+    let failBonjour!: (failure: Error | null) => void;
+    let enterIpv4Visit!: () => void;
+    const ipv4VisitEntered = new Promise<void>((resolve) => {
+      enterIpv4Visit = resolve;
+    });
+    let releaseIpv4Visit!: () => void;
+    const ipv4VisitMayFinish = new Promise<void>((resolve) => {
+      releaseIpv4Visit = resolve;
+    });
+    const supervisor = serveLocalHubRun({
+      bundle: bundle(fakeLlama),
+      hostPort,
+      llamaPort,
+      stateDirectory,
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 500,
+      member: binding,
+      currentInterfaces: () => [selected],
+      memberPeerAddress: () => physicalPeerFor(selected),
+      beforeMemberVisit: async (route) => {
+        if (route === "ipv4") {
+          enterIpv4Visit();
+          await ipv4VisitMayFinish;
+        }
+      },
+      publishBonjour: async () => ({
+        exited: new Promise<Error | null>((resolve) => {
+          failBonjour = resolve;
+        }),
+        async stop() {},
+      }),
+    });
+    const running = await waitForState(stateDirectory, "running");
+    try {
+      await fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.friendlyUrl).host },
+      });
+      const ipv4Visit = fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.ipv4Url).host },
+      }).catch(() => null);
+      await ipv4VisitEntered;
+      failBonjour(new Error("controlled withdrawal during physical visit"));
+      await waitForMemberHealth(stateDirectory, "recheck-required");
+      releaseIpv4Visit();
+      await ipv4Visit;
+      await Bun.sleep(50);
+      expect((await readRunState(stateDirectory))?.member?.health).toBe("recheck-required");
+    } finally {
+      releaseIpv4Visit();
+      await fetch(`${running.host.origin}/stop`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+      await supervisor;
+    }
+  },
+);
+
+macOSProcessTest(
+  "fast physical visits cannot be overwritten by pending publication state",
+  async () => {
+    const selected = currentPrivateInterfaces()[0];
+    if (!selected) throw new Error("The supported macOS test lane has no private interface.");
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+    const [hostPort, llamaPort, memberPort] = await Promise.all([
+      availablePort(),
+      availablePort(),
+      availablePortOn(selected.address),
+    ]);
+    const binding = await createMemberBinding({
+      selected,
+      available: [selected],
+      bonjourName: "localhub-test.local",
+      port: memberPort,
+    });
+    let finishPublication!: () => void;
+    const publicationMayFinish = new Promise<void>((resolve) => {
+      finishPublication = resolve;
+    });
+    const supervisor = serveLocalHubRun({
+      bundle: bundle(fakeLlama),
+      hostPort,
+      llamaPort,
+      stateDirectory,
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 500,
+      member: binding,
+      currentInterfaces: () => [selected],
+      memberPeerAddress: () => physicalPeerFor(selected),
+      publishBonjour: async () => {
+        await publicationMayFinish;
+        return {
+          exited: new Promise<Error | null>(() => undefined),
+          async stop() {},
+        };
+      },
+    });
+
+    await waitForMemberRequest(binding, new URL(binding.friendlyUrl).host);
+    await waitForMemberRequest(binding, new URL(binding.ipv4Url).host);
+    finishPublication();
+    const running = await waitForState(stateDirectory, "running");
+    await waitForMemberHealth(stateDirectory, "ready");
+    try {
+      expect((await readRunState(stateDirectory))?.member?.health).toBe("ready");
+    } finally {
+      await fetch(`${running.host.origin}/stop`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+      await supervisor;
+    }
   },
 );
 
@@ -780,6 +1178,41 @@ async function availablePortOn(hostname: string): Promise<number> {
   await server.stop(true);
   if (port === undefined) throw new Error("Bun did not assign a selected-interface test port.");
   return port;
+}
+
+async function provePhysicalMember(binding: MemberBinding): Promise<void> {
+  for (const host of [new URL(binding.friendlyUrl).host, new URL(binding.ipv4Url).host]) {
+    const response = await fetch(binding.ipv4Url, { headers: { host } });
+    expect(response.status).toBe(200);
+  }
+}
+
+async function waitForMemberRequest(binding: MemberBinding, host: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(binding.ipv4Url, {
+        headers: { host },
+        signal: AbortSignal.timeout(100),
+      });
+      if (response.status === 200) return;
+    } catch {
+      // The selected-interface readiness listener has not opened yet.
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error("Timed out waiting for the selected-interface readiness listener.");
+}
+
+function physicalPeerFor(selected: PrivateInterface): string {
+  const parts = selected.address.split(".").map(Number);
+  for (let suffix = 2; suffix < 255; suffix += 1) {
+    const candidate = `${parts[0]}.${parts[1]}.${parts[2]}.${suffix}`;
+    if (candidate !== selected.address && isPeerOnSelectedSubnet(candidate, selected)) {
+      return candidate;
+    }
+  }
+  throw new Error("The selected test interface has no synthetic same-subnet physical peer.");
 }
 
 async function waitForState(

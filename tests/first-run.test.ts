@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   APPLE_NOTARIZED_TRUST_STATEMENT,
@@ -70,6 +70,18 @@ test("First Run resumes only non-secret choices for the exact candidate", async 
   other.candidate.candidateId = "localhub-0.1.1-bbbbbbbbbbbb-darwin-arm64";
   other.manifest.candidateId = other.candidate.candidateId;
   await expect(readFirstRunState(path, other)).rejects.toThrow("different release candidate");
+});
+
+test("First Run rejects a persisted route that skips required confirmed steps", async () => {
+  const root = await isolatedRoot();
+  const path = join(root, "first-run-state.json");
+  const candidate = verifiedCandidate("unnotarized");
+  const state = createFirstRunState(candidate);
+  state.currentStep = "ready";
+  state.runId = "forged-run";
+  await writeFile(path, JSON.stringify(state));
+
+  await expect(readFirstRunState(path, candidate)).rejects.toThrow("malformed");
 });
 
 test("both exact release trust statements remain visible without a bypass", () => {
@@ -165,6 +177,11 @@ test("Guided Runway performs each approved action once and reaches honest Ready"
         return {
           build: "b10107",
           architecture: "arm64",
+          binary: {
+            path: "runtime/llama.cpp/llama-server",
+            size: 100,
+            sha256: "3".repeat(64),
+          },
           devices: ["Metal: test device"],
           emptyRouterProcessLaunch: "passed",
           health: "passed",
@@ -173,7 +190,10 @@ test("Guided Runway performs each approved action once and reaches honest Ready"
           deadlineMs: 30_000,
         };
       },
-      currentInterfaces: () => [selected],
+      currentInterfaces: () => [
+        { name: "en9", address: "203.0.113.8", netmask: "255.255.255.0" },
+        selected,
+      ],
       resolveBonjourName: async () => "localhub-test.local",
       verifyPhysicalMember: async (binding) => {
         operations.push(`member:${binding.interface.name}`);
@@ -204,6 +224,182 @@ test("Guided Runway performs each approved action once and reaches honest Ready"
     "open",
   ]);
   expect(io.output.join("\n")).toContain("passing Shared Model is still required");
+  expect(result.state.steps["llama-cpp"].summary).toContain("runtime/llama.cpp/llama-server");
+  expect(io.output.join("\n")).not.toContain("203.0.113.8");
+});
+
+test("a stale confirmed Member interface rewinds only Member and downstream steps", async () => {
+  const root = await isolatedRoot();
+  const candidate = verifiedCandidate("unnotarized");
+  const oldInterface = {
+    name: "en0",
+    address: "192.168.50.20",
+    netmask: "255.255.255.0",
+  };
+  const newInterface = {
+    name: "en1",
+    address: "192.168.60.20",
+    netmask: "255.255.255.0",
+  };
+  let state = createFirstRunState(candidate);
+  state = advanceFirstRun(state, {
+    step: "trust",
+    verified: true,
+    summary: "Exact release trust passed.",
+  });
+  state = advanceFirstRun(state, {
+    step: "host-computer",
+    report: evaluateHostComputer({
+      platform: "darwin",
+      architecture: "arm64",
+      osVersion: "27.0",
+      freeBytes: 500_000_000_000,
+      interfaces: [oldInterface],
+      firewall: { enabled: true, blockAll: false, localHubAllowed: null },
+      sleep: { wakeForNetworkAccess: false },
+    }),
+  });
+  state = advanceFirstRun(state, {
+    step: "model-storage",
+    path: "/test/models",
+    freeBytes: 400_000_000_000,
+  });
+  state = advanceFirstRun(state, {
+    step: "llama-cpp",
+    build: "b10107",
+    architecture: "arm64",
+    binary: { path: "runtime/llama.cpp/llama-server", size: 100, sha256: "3".repeat(64) },
+    devices: ["Metal: test device"],
+    emptyRouterProcessLaunch: "passed",
+    health: "passed",
+    stop: "passed",
+    noModelLoaded: true,
+    deadlineMs: 30_000,
+  });
+  state = advanceFirstRun(state, {
+    step: "member-lan",
+    interface: oldInterface,
+    bonjourName: "localhub-test.local",
+    port: 39283,
+    physicalFriendlyPassed: true,
+    physicalIpv4Passed: true,
+  });
+  state = advanceFirstRun(state, { step: "web-search", choice: "disabled" });
+  const safeSummaries = {
+    trust: state.steps.trust.summary,
+    host: state.steps["host-computer"].summary,
+    storage: state.steps["model-storage"].summary,
+    runtime: state.steps["llama-cpp"].summary,
+  };
+  const statePath = join(root, "first-run-state.json");
+  await writeFirstRunState(statePath, state);
+  const io = new ScriptedIO(["Start LocalHub", "1", "y", "y", "Start LocalHub"]);
+  const operations: string[] = [];
+
+  const result = await runGuidedFirstRun(
+    { candidate, defaultModelStorage: "/unused", statePath },
+    {
+      io,
+      observeHost: async () => {
+        throw new Error("must preserve confirmed Host checks");
+      },
+      prepareModelStorage: async () => {
+        throw new Error("must preserve confirmed Model Storage");
+      },
+      verifyRuntime: async () => {
+        throw new Error("must preserve confirmed runtime proof");
+      },
+      currentInterfaces: () => [newInterface],
+      resolveBonjourName: async () => "localhub-new.local",
+      verifyPhysicalMember: async (binding) => {
+        operations.push(`member:${binding.interface.name}`);
+        return { physicalFriendlyPassed: true, physicalIpv4Passed: true };
+      },
+      startRun: async (_modelsDirectory, member) => {
+        operations.push(`start:${member.interface.name}`);
+        return { runId: "fresh-run", hostOrigin: "http://127.0.0.1:39281" };
+      },
+      inspectRun: async () => {
+        throw new Error("fresh path must not inspect");
+      },
+      openDashboard: async () => {
+        operations.push("open");
+      },
+    },
+  );
+
+  expect(result.kind).toBe("ready");
+  expect(result.state.choices.modelStorage?.path).toBe("/test/models");
+  expect(result.state.choices.member?.interface).toEqual(newInterface);
+  expect(result.state.steps.trust.summary).toBe(safeSummaries.trust);
+  expect(result.state.steps["host-computer"].summary).toBe(safeSummaries.host);
+  expect(result.state.steps["model-storage"].summary).toBe(safeSummaries.storage);
+  expect(result.state.steps["llama-cpp"].summary).toBe(safeSummaries.runtime);
+  expect(operations).toEqual(["member:en1", "start:en1", "open"]);
+  expect(io.output.join("\n")).toMatch(
+    /Cause:.*confirmed Member interface changed.*Protected state:.*Still works:.*Repair:.*Recheck:/,
+  );
+});
+
+test("unavailable storage reports cause, protected state, one repair, and recheck", async () => {
+  const root = await isolatedRoot();
+  const candidate = verifiedCandidate("unnotarized");
+  let state = createFirstRunState(candidate);
+  state = advanceFirstRun(state, {
+    step: "trust",
+    verified: true,
+    summary: "Exact release trust passed.",
+  });
+  state = advanceFirstRun(state, {
+    step: "host-computer",
+    report: evaluateHostComputer({
+      platform: "darwin",
+      architecture: "arm64",
+      osVersion: "27.0",
+      freeBytes: 500_000_000_000,
+      interfaces: [{ name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" }],
+      firewall: { enabled: true, blockAll: false, localHubAllowed: null },
+      sleep: { wakeForNetworkAccess: false },
+    }),
+  });
+  const statePath = join(root, "first-run-state.json");
+  await writeFirstRunState(statePath, state);
+
+  await expect(
+    runGuidedFirstRun(
+      { candidate, defaultModelStorage: "/unavailable", statePath },
+      {
+        io: new ScriptedIO(["/unavailable", "y"]),
+        observeHost: async () => {
+          throw new Error("must not rerun completed Host checks");
+        },
+        prepareModelStorage: async () => {
+          throw new Error("selected storage is unavailable");
+        },
+        verifyRuntime: async () => {
+          throw new Error("must not run");
+        },
+        currentInterfaces: () => [],
+        resolveBonjourName: async () => {
+          throw new Error("must not run");
+        },
+        verifyPhysicalMember: async () => {
+          throw new Error("must not run");
+        },
+        startRun: async () => {
+          throw new Error("must not run");
+        },
+        inspectRun: async () => {
+          throw new Error("must not run");
+        },
+        openDashboard: async () => {
+          throw new Error("must not run");
+        },
+      },
+    ),
+  ).rejects.toThrow(
+    /Cause:.*selected storage is unavailable.*Protected state:.*Still works:.*Repair:.*Recheck:/,
+  );
 });
 
 test("quitting before trust approval performs no Host, storage, runtime, network, or start action", async () => {

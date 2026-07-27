@@ -591,7 +591,7 @@ async function verifyFile(path: string, identity: FileIdentity, label: string): 
   }
 }
 
-async function fileIdentity(path: string): Promise<Omit<FileIdentity, "path">> {
+export async function fileIdentity(path: string): Promise<Omit<FileIdentity, "path">> {
   const [contents, metadata] = await Promise.all([readFile(path), stat(path)]);
   return {
     size: metadata.size,

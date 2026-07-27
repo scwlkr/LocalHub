@@ -1,6 +1,8 @@
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { RunFailure } from "./run.ts";
-import type { VerifiedReleaseCandidate } from "./release.ts";
-import { isPrivateIpv4, type PrivateInterface } from "./member-gateway.ts";
+import type { FileIdentity, VerifiedReleaseCandidate } from "./release.ts";
+import { isEligibleLanInterface, type PrivateInterface } from "./member-gateway.ts";
 
 export const FIRST_RUN_STATE_SCHEMA = "localhub.first-run-state/v1";
 export const FIRST_RUN_STEPS = [
@@ -49,6 +51,7 @@ export type FirstRunConfirmation =
       step: "llama-cpp";
       build: "b10107";
       architecture: "arm64";
+      binary: FileIdentity;
       devices: string[];
       emptyRouterProcessLaunch: "passed";
       health: "passed";
@@ -220,11 +223,11 @@ export function advanceFirstRun(
       if (confirmation.devices.length === 0 || confirmation.deadlineMs <= 0) {
         throw new Error("Pinned llama.cpp verification did not return an exact finite result.");
       }
-      summary = `Pinned ${confirmation.build} ${confirmation.architecture}; ${confirmation.devices.join(", ")}; empty-router process launch (no model loaded), health, and stop passed within ${confirmation.deadlineMs} ms.`;
+      summary = `Pinned ${confirmation.build} ${confirmation.architecture} binary ${confirmation.binary.path} (${confirmation.binary.size} bytes, sha256:${confirmation.binary.sha256}); ${confirmation.devices.join(", ")}; loopback-only empty-router process launch (no model loaded), health, and stop passed within ${confirmation.deadlineMs} ms.`;
       break;
     case "member-lan":
-      if (!isPrivateIpv4(confirmation.interface.address)) {
-        throw new Error("Member readiness requires the selected RFC 1918 private interface.");
+      if (!isEligibleLanInterface(confirmation.interface)) {
+        throw new Error("Member readiness requires the selected RFC 1918 non-VPN LAN interface.");
       }
       next.choices.member = {
         interface: confirmation.interface,
@@ -256,6 +259,22 @@ export function advanceFirstRun(
   return next;
 }
 
+export function rewindFirstRunForMemberSelection(state: FirstRunState): FirstRunState {
+  if (state.currentStep !== "start-localhub" || state.runId !== null) {
+    throw new Error("Member selection can rewind only before a LocalHub Run has started.");
+  }
+  const next = structuredClone(state);
+  const memberIndex = FIRST_RUN_STEPS.indexOf("member-lan");
+  for (const step of FIRST_RUN_STEPS.slice(memberIndex)) {
+    next.steps[step] = { status: "pending", summary: null };
+  }
+  next.currentStep = "member-lan";
+  next.choices.member = null;
+  next.choices.webSearch = "unreviewed";
+  next.runId = null;
+  return next;
+}
+
 export function renderGuidedRunway(
   state: FirstRunState,
   candidate: VerifiedReleaseCandidate,
@@ -280,7 +299,7 @@ export function renderGuidedRunway(
 }
 
 export function evaluateHostComputer(observation: HostComputerObservation): HostComputerReport {
-  const privateInterfaces = observation.interfaces.filter((item) => isPrivateIpv4(item.address));
+  const privateInterfaces = observation.interfaces.filter(isEligibleLanInterface);
   const results: HostComputerResult[] = [
     {
       name: "Apple Silicon",
@@ -401,30 +420,51 @@ function isFirstRunState(value: unknown): value is FirstRunState {
     if (
       !record ||
       (record.status !== "pending" && record.status !== "passed") ||
-      (record.summary !== null && typeof record.summary !== "string")
+      (record.status === "passed"
+        ? typeof record.summary !== "string" || record.summary.length === 0
+        : record.summary !== null)
     ) {
       return false;
     }
   }
+  const currentIndex = FIRST_RUN_STEPS.indexOf(state.currentStep as FirstRunStep);
+  for (const [index, step] of FIRST_RUN_STEPS.entries()) {
+    const status = state.steps[step]?.status;
+    const expected = index < currentIndex ? "passed" : "pending";
+    if (state.currentStep === "ready" && step === "ready") {
+      if (status !== "pending" && status !== "passed") return false;
+    } else if (status !== expected) {
+      return false;
+    }
+  }
   const choices = state.choices;
+  const modelStoragePassed = state.steps["model-storage"]?.status === "passed";
+  const memberPassed = state.steps["member-lan"]?.status === "passed";
+  const webSearchPassed = state.steps["web-search"]?.status === "passed";
+  const startPassed = state.steps["start-localhub"]?.status === "passed";
   if (
     (choices.webSearch !== "unreviewed" && choices.webSearch !== "disabled") ||
+    (webSearchPassed ? choices.webSearch !== "disabled" : choices.webSearch !== "unreviewed") ||
     (choices.modelStorage !== null &&
       (typeof choices.modelStorage?.path !== "string" ||
+        choices.modelStorage.path.length === 0 ||
         !Number.isSafeInteger(choices.modelStorage.freeBytes) ||
         choices.modelStorage.freeBytes < 0)) ||
+    modelStoragePassed !== (choices.modelStorage !== null) ||
     (choices.member !== null &&
       (typeof choices.member?.interface?.name !== "string" ||
-        !isPrivateIpv4(choices.member.interface.address) ||
+        !isEligibleLanInterface(choices.member.interface) ||
         typeof choices.member.interface.netmask !== "string" ||
         typeof choices.member.bonjourName !== "string" ||
         !Number.isInteger(choices.member.port) ||
+        choices.member.port < 1024 ||
+        choices.member.port > 65535 ||
         choices.member.physicalFriendlyPassed !== true ||
-        choices.member.physicalIpv4Passed !== true))
+        choices.member.physicalIpv4Passed !== true)) ||
+    memberPassed !== (choices.member !== null) ||
+    startPassed !== (typeof state.runId === "string" && state.runId.length > 0)
   ) {
     return false;
   }
   return true;
 }
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";

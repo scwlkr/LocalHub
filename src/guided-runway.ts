@@ -4,16 +4,18 @@ import {
   evaluateHostComputer,
   readFirstRunState,
   renderGuidedRunway,
+  rewindFirstRunForMemberSelection,
   writeFirstRunState,
   type FirstRunState,
   type HostComputerObservation,
 } from "./first-run.ts";
 import {
   createMemberBinding,
+  isEligibleLanInterface,
   type MemberBinding,
   type PrivateInterface,
 } from "./member-gateway.ts";
-import type { VerifiedReleaseCandidate } from "./release.ts";
+import type { FileIdentity, VerifiedReleaseCandidate } from "./release.ts";
 
 export interface GuidedRunwayIO {
   print(message?: string): void;
@@ -30,6 +32,7 @@ export interface GuidedFirstRunOptions {
 export interface GuidedRuntimeResult {
   build: "b10107";
   architecture: "arm64";
+  binary: FileIdentity;
   devices: string[];
   emptyRouterProcessLaunch: "passed";
   health: "passed";
@@ -156,7 +159,7 @@ export async function runGuidedFirstRun(
         break;
       }
       case "member-lan": {
-        const interfaces = dependencies.currentInterfaces();
+        const interfaces = dependencies.currentInterfaces().filter(isEligibleLanInterface);
         if (interfaces.length === 0) {
           throw new Error(
             "Cause: no RFC 1918 private interface is available. Protected state: the Member gateway remains closed. Repair: connect the intended trusted LAN without a VPN substitution. Recheck: rerun Member LAN readiness.",
@@ -228,6 +231,9 @@ export async function runGuidedFirstRun(
         break;
       }
       case "start-localhub": {
+        dependencies.io.print(
+          "After start, reopen both displayed Member links from the physical device. The active Run stays in physical-verification-required state until both pass.",
+        );
         const answer = (
           await dependencies.io.ask('Type "Start LocalHub" to start this Run (q to quit): ')
         ).trim();
@@ -237,12 +243,22 @@ export async function runGuidedFirstRun(
         }
         const storage = requiredStorage(state);
         const member = requiredMember(state);
-        const binding = await createMemberBinding({
-          selected: member.interface,
-          available: dependencies.currentInterfaces(),
-          bonjourName: member.bonjourName,
-          port: member.port,
-        });
+        let binding: MemberBinding;
+        try {
+          binding = await createMemberBinding({
+            selected: member.interface,
+            available: dependencies.currentInterfaces(),
+            bonjourName: member.bonjourName,
+            port: member.port,
+          });
+        } catch (error) {
+          const cause = error instanceof Error ? error.message : String(error);
+          state = rewindFirstRunForMemberSelection(state);
+          dependencies.io.print(
+            `Cause: the confirmed Member interface changed before Start LocalHub: ${cause} Protected state: no Run or listener started and the stale Member choice was cleared. Still works: release trust, Host checks, Model Storage, and pinned runtime proof remain confirmed. Repair: select the currently listed trusted LAN interface. Recheck: rerun physical readiness for both newly displayed Member links.`,
+          );
+          break;
+        }
         const run = await protectedStep(
           () => dependencies.startRun(storage.path, binding),
           "Start LocalHub",
@@ -262,7 +278,13 @@ export async function runGuidedFirstRun(
       case "ready": {
         if (!hostOrigin) {
           if (!state.runId) throw new Error("Ready is missing the exact LocalHub Run identity.");
-          const inspected = await dependencies.inspectRun(state.runId);
+          const inspected = await protectedStep(
+            () => dependencies.inspectRun(state.runId as string),
+            "Ready Run recheck",
+            "No Run, listener, model, or state was started, stopped, or changed.",
+            "Restore or explicitly start the exact verified LocalHub Run.",
+            "Run `lh run status`, then enter Guided First Run again.",
+          );
           if (inspected.runId !== state.runId || !inspected.memberReady) {
             throw new Error(
               "The exact active Run and selected Member Link did not pass Ready recheck.",
