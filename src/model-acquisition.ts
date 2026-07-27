@@ -185,7 +185,7 @@ export async function prepareLocalModel(
   dependencies: ModelAcquisitionDependencies = {},
 ): Promise<ModelAcquisition> {
   const storagePath = resolve(options.storagePath);
-  await assertModelStorage(storagePath);
+  await assertManagedModelStorage(storagePath);
   if (!options.displayName.trim())
     throw new Error("Installed Model display name must not be empty.");
   if (options.files.length === 0) throw new Error("Select at least one exact local GGUF file.");
@@ -255,7 +255,7 @@ export async function prepareLocalModel(
     );
   }
 
-  return await withModelMutationLock(storagePath, dependencies, async () => {
+  return await withModelCatalogMutationLock(storagePath, dependencies, async () => {
     const state = await readReconciledModelState(storagePath);
     const foldedName = options.displayName.trim().toLocaleLowerCase("en-US");
     if (
@@ -296,8 +296,8 @@ export async function importLocalModel(
   dependencies: ModelImportDependencies = {},
 ): Promise<InstalledModel> {
   const storagePath = resolve(storagePathValue);
-  await assertModelStorage(storagePath);
-  return await withModelMutationLock(
+  await assertManagedModelStorage(storagePath);
+  return await withModelCatalogMutationLock(
     storagePath,
     dependencies,
     async () => await importLocalModelLocked(storagePath, acquisitionId, dependencies),
@@ -516,7 +516,7 @@ export async function renameInstalledModel(
   const storagePath = resolve(storagePathValue);
   const displayName = displayNameValue.trim();
   if (!displayName) throw new Error("Installed Model display name must not be empty.");
-  return await withModelMutationLock(storagePath, dependencies, async () => {
+  return await withModelCatalogMutationLock(storagePath, dependencies, async () => {
     const state = await readReconciledModelState(storagePath);
     const model = state.installedModels.find((item) => item.id === modelId);
     if (!model) throw new Error(`Unknown Installed Model content identity: ${modelId}`);
@@ -540,7 +540,7 @@ export async function discardModelAcquisition(
   dependencies: ModelMutationDependencies = {},
 ): Promise<ModelAcquisition> {
   const storagePath = resolve(storagePathValue);
-  return await withModelMutationLock(storagePath, dependencies, async () => {
+  return await withModelCatalogMutationLock(storagePath, dependencies, async () => {
     const state = await readReconciledModelState(storagePath);
     const acquisition = state.acquisitions.find((item) => item.id === acquisitionId);
     if (!acquisition) throw new Error(`Unknown Model Acquisition: ${acquisitionId}`);
@@ -571,7 +571,7 @@ export async function inspectInstalledModels(storagePathValue: string): Promise<
   );
 }
 
-async function assertModelStorage(storagePath: string): Promise<void> {
+export async function assertManagedModelStorage(storagePath: string): Promise<void> {
   const root = await lstat(storagePath);
   if (!root.isDirectory() || root.isSymbolicLink()) {
     throw new Error("Model Storage must be the exact confirmed non-symbolic-link folder.");
@@ -762,11 +762,12 @@ class LocalCopyInterruptedError extends Error {
   }
 }
 
-async function withModelMutationLock<T>(
+export async function withModelCatalogMutationLock<T>(
   storagePath: string,
   dependencies: ModelMutationDependencies,
   mutation: () => Promise<T>,
 ): Promise<T> {
+  await assertManagedModelStorage(storagePath);
   const lockPath = join(storagePath, ".localhub-catalog", MUTATION_LOCK_NAME);
   const nonce = randomUUID();
   const claimPath = `${lockPath}.claim.${process.pid}.${nonce}`;
@@ -870,7 +871,7 @@ function isProcessAlive(pid: number): boolean {
 async function readModelStateForInspection(storagePath: string): Promise<ModelState> {
   if (!(await pathExists(promotionJournalPath(storagePath))))
     return await readModelState(storagePath);
-  return await withModelMutationLock(
+  return await withModelCatalogMutationLock(
     storagePath,
     {},
     async () => await readReconciledModelState(storagePath),

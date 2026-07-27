@@ -12,9 +12,11 @@ import {
   LLAMA_CPP_ARCHIVE_SHA256,
   LLAMA_CPP_ARCHIVE_SIZE,
   APPLE_NOTARIZED_TRUST_STATEMENT,
+  type ReleaseManifest,
   assembleExpandCandidate,
   createExpandReleaseManifest,
   verifyReleaseCandidate,
+  verifyReleaseCandidateForRecovery,
 } from "../src/release.ts";
 
 const VERIFIED_TEST_ASSET = {
@@ -31,7 +33,10 @@ test("an assembled candidate verifies its exact executable and manifest identity
     const candidatePath = join(directory, "release-candidate.json");
     await writeFile(executablePath, "assembled-localhub");
 
-    const manifest = releaseManifest(await fileIdentity(executablePath));
+    const manifest = releaseManifest(await fileIdentity(executablePath)) as Omit<
+      ReturnType<typeof releaseManifest>,
+      "runtime"
+    > & { runtime: ReleaseManifest["runtime"] };
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     const candidate = {
       schema: RELEASE_CANDIDATE_SCHEMA,
@@ -51,6 +56,66 @@ test("an assembled candidate verifies its exact executable and manifest identity
     expect(verified.candidate.candidateId).toBe("localhub-0.1.1-aaaaaaaaaaaa-darwin-arm64");
     expect(verified.manifest.release.commit).toBe("a".repeat(40));
     expect(verified.manifest.asset.sha256).toBe(candidate.asset.sha256);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovery verification keeps candidate authority while tolerating only broken runtime disk state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "localhub-release-recovery-"));
+  try {
+    const executablePath = join(directory, "lh");
+    const manifestPath = join(directory, "release-manifest.json");
+    const candidatePath = join(directory, "release-candidate.json");
+    await writeFile(executablePath, "assembled-localhub");
+    const manifest = releaseManifest(await fileIdentity(executablePath)) as Omit<
+      ReturnType<typeof releaseManifest>,
+      "runtime"
+    > & { runtime: ReleaseManifest["runtime"] };
+    manifest.runtime = {
+      llamaCpp: {
+        root: "runtime/llama.cpp",
+        archive: {
+          name: LLAMA_CPP_ARCHIVE_NAME,
+          size: LLAMA_CPP_ARCHIVE_SIZE,
+          sha256: LLAMA_CPP_ARCHIVE_SHA256,
+        },
+        files: [
+          {
+            kind: "file",
+            path: "llama-server",
+            size: 1,
+            sha256: "0".repeat(64),
+          },
+        ],
+      },
+    };
+    const llama = manifest.dependencies.find((item) => item.name === "llama.cpp");
+    if (!llama) throw new Error("Missing llama.cpp fixture dependency.");
+    llama.included = true;
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const candidate = {
+      schema: RELEASE_CANDIDATE_SCHEMA,
+      candidateId: manifest.candidateId,
+      assembledAt: "2026-07-27T18:00:00.000Z",
+      asset: { path: "lh", ...(await fileIdentity(executablePath)) },
+      manifest: { path: "release-manifest.json", ...(await fileIdentity(manifestPath)) },
+    };
+    await writeFile(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`);
+
+    await expect(
+      verifyReleaseCandidate(candidatePath, executablePath, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow();
+    expect(
+      (await verifyReleaseCandidateForRecovery(candidatePath, executablePath, VERIFIED_TEST_ASSET))
+        .candidate.candidateId,
+    ).toBe(candidate.candidateId);
+
+    candidate.asset.sha256 = "f".repeat(64);
+    await writeFile(candidatePath, `${JSON.stringify(candidate, null, 2)}\n`);
+    await expect(
+      verifyReleaseCandidateForRecovery(candidatePath, executablePath, VERIFIED_TEST_ASSET),
+    ).rejects.toThrow("release asset checksum");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

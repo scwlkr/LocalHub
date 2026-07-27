@@ -27,10 +27,15 @@ import { THIRD_PARTY_NOTICES } from "./notices.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
 import {
   findProfileWorkerPort,
+  inspectCurrentProfileBinding,
   runProfileWorker,
   type RunProfileWorkerOptions,
 } from "./profile-worker.ts";
-import { type ReleaseAssetInspection, verifyReleaseCandidate } from "./release.ts";
+import {
+  type ReleaseAssetInspection,
+  verifyReleaseCandidate,
+  verifyReleaseCandidateForRecovery,
+} from "./release.ts";
 import {
   acceptSharedModelRequest,
   createRunProfile,
@@ -42,6 +47,7 @@ import {
   setSharedModelPublished,
   testRunProfile,
   type RunProfileControls,
+  type CurrentProfileBinding,
   type RunProfileRuntime,
 } from "./run-profile.ts";
 import {
@@ -159,6 +165,7 @@ export interface CliDependencies {
   recheckMember?: typeof recheckMemberLink;
   modelStoragePath?: string;
   profileRuntime?: { runtime: RunProfileRuntime; binaryPath: string };
+  profileBinding?: CurrentProfileBinding;
   profilePort?: () => Promise<number>;
   runProfileTestWorker?: (options: RunProfileWorkerOptions) => ReturnType<typeof runProfileWorker>;
 }
@@ -280,9 +287,10 @@ export async function main(
   }
   if (profileCommand) {
     try {
+      const recoveryCommand = isRecoveryProfileCommand(profileCommand);
       const storagePath =
         dependencies.modelStoragePath ??
-        (await configuredModelStorage({
+        (await (recoveryCommand ? configuredModelStorageForRecovery : configuredModelStorage)({
           buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
           candidateRecordPath,
           executablePath,
@@ -293,18 +301,34 @@ export async function main(
             ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
             : {}),
         }));
-      const runtime =
-        dependencies.profileRuntime ??
-        (await configuredProfileRuntime({
-          buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
-          candidateRecordPath,
-          executablePath,
-          ...(dependencies.inspectReleaseAsset
-            ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
-            : {}),
-        }));
+      let runtime: { runtime: RunProfileRuntime; binaryPath: string } | undefined;
+      let currentBinding = dependencies.profileBinding;
+      if (!isOfflineRecoveryTransition(profileCommand)) {
+        try {
+          runtime =
+            dependencies.profileRuntime ??
+            (await configuredProfileRuntime({
+              buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+              candidateRecordPath,
+              executablePath,
+              ...(dependencies.inspectReleaseAsset
+                ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+                : {}),
+            }));
+          currentBinding ??= await inspectCurrentProfileBinding(
+            runtime.binaryPath,
+            runtime.runtime,
+          );
+        } catch (error) {
+          if (!isRecoveryListCommand(profileCommand)) throw error;
+          currentBinding = {
+            available: false,
+            cause: `Exact current runtime or Host binding is unavailable: ${errorMessage(error)}`,
+          };
+        }
+      }
       const result = await runProfileCommand(
-        { storagePath, ...runtime },
+        { storagePath, ...(runtime ?? {}), ...(currentBinding ? { currentBinding } : {}) },
         profileCommand,
         dependencies,
       );
@@ -776,6 +800,21 @@ type ProfileCommand =
   | { kind: "shared-target"; id: string }
   | { kind: "shared-list" };
 
+function isRecoveryListCommand(command: ProfileCommand): boolean {
+  return command.kind === "profile-list" || command.kind === "shared-list";
+}
+
+function isOfflineRecoveryTransition(command: ProfileCommand): boolean {
+  return (
+    command.kind === "shared-transition" &&
+    (command.transition === "unpin" || command.transition === "unshare")
+  );
+}
+
+function isRecoveryProfileCommand(command: ProfileCommand): boolean {
+  return isRecoveryListCommand(command) || isOfflineRecoveryTransition(command);
+}
+
 function parseProfileCommand(args: string[]): ProfileCommand | "invalid" | null {
   if (args[0] !== "profile" && args[0] !== "shared") return null;
   if (args[0] === "profile") {
@@ -878,12 +917,18 @@ function parseProfileCommand(args: string[]): ProfileCommand | "invalid" | null 
 }
 
 async function runProfileCommand(
-  context: { storagePath: string; runtime: RunProfileRuntime; binaryPath: string },
+  context: {
+    storagePath: string;
+    runtime?: RunProfileRuntime;
+    binaryPath?: string;
+    currentBinding?: CurrentProfileBinding;
+  },
   command: ProfileCommand,
   dependencies: CliDependencies,
 ): Promise<unknown> {
   switch (command.kind) {
     case "profile-create": {
+      const runtime = requiredProfileRuntime(context);
       const model = (await inspectInstalledModels(context.storagePath)).find(
         (item) => item.id === command.modelId,
       );
@@ -903,7 +948,7 @@ async function runProfileCommand(
       return await createRunProfile(context.storagePath, {
         name: command.name,
         modelId: model.id,
-        runtime: context.runtime,
+        runtime,
         chatTemplate,
         controls: profileControls(command),
         estimates: { projectedRamBytes: null, projectedGpuBytes: null },
@@ -911,7 +956,7 @@ async function runProfileCommand(
     }
     case "profile-revise": {
       const ledger = await inspectRunProfiles(context.storagePath, {
-        currentRuntime: context.runtime,
+        currentBinding: requiredProfileBinding(context),
       });
       const previous = ledger.revisions.find((item) => item.id === command.revisionId);
       if (!previous) throw new Error(`Unknown exact Run Profile revision: ${command.revisionId}.`);
@@ -920,16 +965,20 @@ async function runProfileCommand(
       });
     }
     case "profile-test": {
+      const runtime = requiredProfileRuntime(context);
+      const binaryPath = requiredProfileBinary(context);
       const [ledger, models] = await Promise.all([
-        inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime }),
+        inspectRunProfiles(context.storagePath, {
+          currentBinding: requiredProfileBinding(context),
+        }),
         inspectInstalledModels(context.storagePath),
       ]);
       const revision = ledger.revisions.find((item) => item.id === command.revisionId);
       if (!revision) throw new Error(`Unknown exact Run Profile revision: ${command.revisionId}.`);
       if (
-        revision.runtime.binarySha256 !== context.runtime.binarySha256 ||
-        revision.runtime.build !== context.runtime.build ||
-        revision.runtime.commit !== context.runtime.commit
+        revision.runtime.binarySha256 !== runtime.binarySha256 ||
+        revision.runtime.build !== runtime.build ||
+        revision.runtime.commit !== runtime.commit
       ) {
         throw new Error(
           "Exact Run Profile runtime is unavailable in this candidate; no runtime was substituted.",
@@ -942,7 +991,7 @@ async function runProfileCommand(
         );
       }
       const observation = await (dependencies.runProfileTestWorker ?? runProfileWorker)({
-        binaryPath: context.binaryPath,
+        binaryPath,
         revision,
         model,
         port: await (dependencies.profilePort ?? findProfileWorkerPort)(),
@@ -954,7 +1003,9 @@ async function runProfileCommand(
       return result;
     }
     case "profile-list":
-      return await inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime });
+      return await inspectRunProfiles(context.storagePath, {
+        currentBinding: requiredProfileBinding(context),
+      });
     case "shared-publish":
       return await publishSharedModel(
         context.storagePath,
@@ -968,7 +1019,7 @@ async function runProfileCommand(
           },
           capabilities: ["text"],
         },
-        { currentRuntime: context.runtime },
+        { currentBinding: requiredProfileBinding(context) },
       );
     case "shared-transition":
       if (command.transition === "pin" || command.transition === "unpin") {
@@ -976,27 +1027,48 @@ async function runProfileCommand(
           context.storagePath,
           command.id,
           command.transition === "pin",
-          { currentRuntime: context.runtime },
+          command.transition === "pin" ? { currentBinding: requiredProfileBinding(context) } : {},
         );
       }
       return await setSharedModelPublished(
         context.storagePath,
         command.id,
         command.transition === "share",
-        { currentRuntime: context.runtime },
+        command.transition === "share" ? { currentBinding: requiredProfileBinding(context) } : {},
       );
     case "shared-replace":
       return await replaceSharedModel(context.storagePath, command.id, command.revisionId, {
-        currentRuntime: context.runtime,
+        currentBinding: requiredProfileBinding(context),
       });
     case "shared-target":
       return await acceptSharedModelRequest(context.storagePath, command.id, {
-        currentRuntime: context.runtime,
+        currentBinding: requiredProfileBinding(context),
       });
     case "shared-list":
-      return (await inspectRunProfiles(context.storagePath, { currentRuntime: context.runtime }))
-        .sharedModels;
+      return (
+        await inspectRunProfiles(context.storagePath, {
+          currentBinding: requiredProfileBinding(context),
+        })
+      ).sharedModels;
   }
+}
+
+function requiredProfileRuntime(context: { runtime?: RunProfileRuntime }): RunProfileRuntime {
+  if (!context.runtime) throw new Error("Exact current llama.cpp runtime is unavailable.");
+  return context.runtime;
+}
+
+function requiredProfileBinary(context: { binaryPath?: string }): string {
+  if (!context.binaryPath) throw new Error("Exact current llama.cpp binary is unavailable.");
+  return context.binaryPath;
+}
+
+function requiredProfileBinding(context: {
+  currentBinding?: CurrentProfileBinding;
+}): CurrentProfileBinding {
+  if (!context.currentBinding)
+    throw new Error("Exact current runtime and Host binding is unavailable.");
+  return context.currentBinding;
 }
 
 function profileControls(
@@ -1086,6 +1158,30 @@ async function configuredModelStorage(options: {
   inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
 }): Promise<string> {
   const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+      ...(options.inspectReleaseAsset ? { inspectAsset: options.inspectReleaseAsset } : {}),
+    },
+  );
+  const firstRun = await readFirstRunState(options.firstRunStatePath, candidate);
+  if (!firstRun?.choices.modelStorage) {
+    throw new Error(
+      "Guided First Run has not confirmed Model Storage for this exact candidate. Run `lh first-run`.",
+    );
+  }
+  return firstRun.choices.modelStorage.path;
+}
+
+async function configuredModelStorageForRecovery(options: {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  firstRunStatePath: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+}): Promise<string> {
+  const candidate = await verifyReleaseCandidateForRecovery(
     options.candidateRecordPath,
     options.executablePath,
     {

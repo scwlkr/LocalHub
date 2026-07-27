@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { main } from "../src/cli.ts";
 import type { InstalledModel } from "../src/model-acquisition.ts";
 import {
   acceptSharedModelRequest,
@@ -12,6 +13,7 @@ import {
   setSharedModelPin,
   setSharedModelPublished,
   testRunProfile,
+  type CurrentProfileBinding,
   type ProfileTestObservation,
   type RunProfileControls,
   type RunProfileRuntime,
@@ -99,6 +101,7 @@ test("editing an exact passing Run Profile creates an untested revision and deri
     projectedRamBytes: 700_000_000,
     projectedGpuBytes: 500_000_000,
   });
+  expect(ledger.sharedModels).toEqual([]);
 });
 
 test("Profile Test fails closed when any exact observation or mandatory behavior differs", async () => {
@@ -306,7 +309,7 @@ test("missing, renamed, stale, incompatible, and similarly named substitutes rem
   } as RunProfileRuntime;
   const runtimeLedger = await inspectRunProfiles(storagePath, {
     ...catalogDependencies(exact, similarlyNamed),
-    currentRuntime: differentRuntime,
+    currentBinding: availableBinding({ runtime: differentRuntime }),
   });
   expect(runtimeLedger.revisions.find((item) => item.id === edited.id)?.evidenceState).toBe(
     "Stale",
@@ -322,10 +325,174 @@ test("missing, renamed, stale, incompatible, and similarly named substitutes rem
       },
       {
         ...catalogDependencies(exact, similarlyNamed),
-        currentRuntime: differentRuntime,
+        currentBinding: availableBinding({ runtime: differentRuntime }),
       },
     ),
   ).rejects.toThrow("runtime");
+});
+
+test("runtime, Host device, and macOS changes make current evidence stale", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const runtime = pinnedRuntime();
+  const revision = await passingRevision(storagePath, "Current binding", model, runtime, 4096);
+
+  for (const currentBinding of [
+    availableBinding({ runtime: { ...runtime, binarySha256: "9".repeat(64) } }),
+    availableBinding({ host: { ...hostBinding(), devices: ["MTL1: Replacement GPU"] } }),
+    availableBinding({ host: { ...hostBinding(), osVersion: "macOS 27.1" } }),
+  ]) {
+    const ledger = await inspectRunProfiles(storagePath, {
+      ...catalogDependencies(model),
+      currentBinding,
+    });
+    expect(ledger.revisions[0]?.evidenceState).toBe("Stale");
+    await expect(
+      publishSharedModel(
+        storagePath,
+        {
+          name: `Stale ${currentBinding.available ? currentBinding.host.osVersion : "missing"}`,
+          revisionId: revision.id,
+          limits: { contextTokens: 1024, outputTokens: 128, concurrentRequests: 1 },
+          capabilities: ["text"],
+        },
+        { ...catalogDependencies(model), currentBinding },
+      ),
+    ).rejects.toThrow("stale");
+  }
+});
+
+test("missing runtime is visibly unavailable while unshare and unpin remain recoverable", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const revision = await passingRevision(
+    storagePath,
+    "Recovery profile",
+    model,
+    pinnedRuntime(),
+    4096,
+  );
+  const shared = await publishSharedModel(
+    storagePath,
+    {
+      name: "Recovery shared",
+      revisionId: revision.id,
+      limits: { contextTokens: 1024, outputTokens: 128, concurrentRequests: 1 },
+      capabilities: ["text"],
+    },
+    catalogDependencies(model),
+  );
+  await setSharedModelPin(storagePath, shared.id, true, catalogDependencies(model));
+  const unavailable: CurrentProfileBinding = {
+    available: false,
+    cause: "Exact candidate runtime is missing.",
+  };
+
+  const ledger = await inspectRunProfiles(storagePath, {
+    ...catalogDependencies(model),
+    currentBinding: unavailable,
+  });
+  expect(ledger.revisions[0]?.evidenceState).toBe("Missing");
+  expect(ledger.sharedModels[0]).toMatchObject({
+    published: true,
+    pinned: true,
+    evidenceState: "Missing",
+    acceptingNewWork: false,
+    unavailableCause: "Exact candidate runtime is missing.",
+  });
+  await expect(
+    acceptSharedModelRequest(storagePath, shared.id, {
+      ...catalogDependencies(model),
+      currentBinding: unavailable,
+    }),
+  ).rejects.toThrow("runtime is unavailable");
+
+  const listedOutput: string[] = [];
+  const listedOriginalLog = console.log;
+  console.log = (...values: unknown[]) => listedOutput.push(values.map(String).join(" "));
+  try {
+    expect(await main(["shared", "list"], { modelStoragePath: storagePath })).toBe(0);
+  } finally {
+    console.log = listedOriginalLog;
+  }
+  expect(JSON.parse(listedOutput[0] ?? "[]")[0]).toMatchObject({
+    id: shared.id,
+    evidenceState: "Missing",
+    acceptingNewWork: false,
+    unavailableCause: expect.stringContaining("runtime or Host binding is unavailable"),
+  });
+
+  expect((await setSharedModelPin(storagePath, shared.id, false)).pinned).toBeFalse();
+  expect((await setSharedModelPublished(storagePath, shared.id, false)).published).toBeFalse();
+
+  await setSharedModelPin(storagePath, shared.id, true, catalogDependencies(model));
+  await setSharedModelPublished(storagePath, shared.id, true, catalogDependencies(model));
+  const originalLog = console.log;
+  console.log = () => undefined;
+  try {
+    expect(await main(["shared", "unpin", shared.id], { modelStoragePath: storagePath })).toBe(0);
+    expect(await main(["shared", "unshare", shared.id], { modelStoragePath: storagePath })).toBe(0);
+  } finally {
+    console.log = originalLog;
+  }
+  const recovered = await inspectRunProfiles(storagePath, {
+    ...catalogDependencies(model),
+    currentBinding: unavailable,
+  });
+  expect(recovered.sharedModels[0]).toMatchObject({ pinned: false, published: false });
+});
+
+test("profile catalog rejects symlinks and malformed records and reclaims a dead shared lock", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const catalogPath = join(storagePath, ".localhub-catalog");
+  const protectedPath = await mkdtemp(join(process.cwd(), "dist", "profile-protected-"));
+  roots.push(protectedPath);
+  await writeFile(join(protectedPath, "keep.txt"), "keep");
+  await rm(catalogPath, { recursive: true });
+  await symlink(protectedPath, catalogPath);
+  await expect(
+    createRunProfile(storagePath, profileInput(model), catalogDependencies(model)),
+  ).rejects.toThrow("not a safe folder");
+  expect(await readFile(join(protectedPath, "keep.txt"), "utf8")).toBe("keep");
+
+  await rm(catalogPath);
+  await mkdir(catalogPath, { mode: 0o700 });
+  const lockPath = join(catalogPath, "mutation.lock");
+  await mkdir(lockPath, { mode: 0o700 });
+  await writeFile(
+    join(lockPath, "owner.json"),
+    `${JSON.stringify({ pid: 999_999, nonce: "dead", createdAt: new Date().toISOString() })}\n`,
+  );
+  const revision = await createRunProfile(storagePath, profileInput(model), {
+    ...catalogDependencies(model),
+    processAlive: () => false,
+  });
+  expect(revision.revision).toBe(1);
+
+  const statePath = join(catalogPath, "run-profiles.json");
+  const malformed = JSON.parse(await readFile(statePath, "utf8")) as Record<string, unknown>;
+  const malformedRevision = (malformed.revisions as Array<Record<string, unknown>>)[0];
+  if (!malformedRevision) throw new Error("Missing Run Profile fixture revision.");
+  malformedRevision.controls = { contextSize: "bad" };
+  await writeFile(statePath, `${JSON.stringify(malformed)}\n`);
+  await expect(inspectRunProfiles(storagePath, catalogDependencies(model))).rejects.toThrow(
+    "incomplete or malformed",
+  );
+});
+
+test("concurrent profile mutations preserve both exact revisions", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const dependencies = catalogDependencies(model);
+  let sequence = 0;
+  dependencies.randomId = () => `concurrent-${++sequence}`;
+  const [left, right] = await Promise.all([
+    createRunProfile(storagePath, { ...profileInput(model), name: "Left" }, dependencies),
+    createRunProfile(storagePath, { ...profileInput(model), name: "Right" }, dependencies),
+  ]);
+  const ledger = await inspectRunProfiles(storagePath, dependencies);
+  expect(new Set(ledger.revisions.map((item) => item.id))).toEqual(new Set([left.id, right.id]));
 });
 
 async function passingRevision(
@@ -390,9 +557,7 @@ function passingObservation(
       throughputTokensPerSecond: 14.5,
     },
     host: {
-      hardware: "Apple M1 Max",
-      devices: ["Metal:0"],
-      osVersion: "macOS 27.0",
+      ...hostBinding(),
     },
     optionalCapabilities: {
       imageInput: "Unavailable",
@@ -472,8 +637,39 @@ function catalogDependencies(...models: InstalledModel[]) {
   let id = 0;
   return {
     inspectModels: async () => models,
+    currentBinding: availableBinding(),
     now: () => new Date("2026-07-27T12:00:00.000Z"),
     randomId: () => `id-${++id}`,
+  };
+}
+
+function hostBinding() {
+  return {
+    hardware: "Apple M1 Max",
+    devices: ["MTL0: Apple M1 Max"],
+    osVersion: "macOS 27.0",
+  };
+}
+
+function availableBinding(
+  overrides: Partial<Extract<CurrentProfileBinding, { available: true }>> = {},
+): CurrentProfileBinding {
+  return {
+    available: true,
+    runtime: pinnedRuntime(),
+    host: hostBinding(),
+    ...overrides,
+  };
+}
+
+function profileInput(model: InstalledModel) {
+  return {
+    name: "Safe profile",
+    modelId: model.id,
+    runtime: pinnedRuntime(),
+    chatTemplate: "{{ messages }}",
+    controls: controls(),
+    estimates: { projectedRamBytes: null, projectedGpuBytes: null },
   };
 }
 
