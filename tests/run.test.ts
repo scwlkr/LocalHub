@@ -1,30 +1,30 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { EventEmitter } from "node:events";
-import type { ChildProcess } from "node:child_process";
-import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { main } from "../src/cli.ts";
-import {
-  RUN_STATE_SCHEMA,
-  buildLlamaLaunch,
-  buildSupervisorLaunch,
-  currentPrivateInterfaces,
-  inspectLocalHubRun,
-  publishBonjourService,
-  readRunState,
-  serveLocalHubRun,
-  startLocalHubRun,
-  stopLocalHubRun,
-  writeRunState,
-  type LocalHubRunState,
-  type RunBundle,
-} from "../src/run.ts";
 import {
   createMemberBinding,
   isPeerOnSelectedSubnet,
   type MemberBinding,
   type PrivateInterface,
 } from "../src/member-gateway.ts";
+import {
+  buildLlamaLaunch,
+  buildSupervisorLaunch,
+  currentPrivateInterfaces,
+  inspectLocalHubRun,
+  type LocalHubRunState,
+  publishBonjourService,
+  RUN_STATE_SCHEMA,
+  type RunBundle,
+  readRunState,
+  serveLocalHubRun,
+  startLocalHubRun,
+  stopLocalHubRun,
+  writeRunState,
+} from "../src/run.ts";
 
 const testRoots: string[] = [];
 const macOSProcessTest = process.platform === "darwin" ? test : test.skip;
@@ -108,7 +108,7 @@ test("the supervisor receives one explicit selected-interface Member boundary", 
     llamaPort: 39282,
     logPath: "/state/run.log",
     stateDirectory: "/state",
-    modelsDirectory: "/models",
+    modelStorageDirectory: "/models",
     member: {
       interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
       bonjourName: "localhub-test.local",
@@ -127,7 +127,7 @@ test("the supervisor receives one explicit selected-interface Member boundary", 
     "39281",
     "--llama-port",
     "39282",
-    "--models-dir",
+    "--model-storage",
     "/models",
     "--member-interface",
     "en0",
@@ -150,10 +150,13 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
     main(["run", "start"], {
       buildCommit: "a".repeat(40),
       executablePath: "/candidate/lh",
+      modelStoragePath: "/models",
       runCandidateRecordPath: "/candidate/release-candidate.json",
       runStateDirectory: "/state",
       startRun: async (options) => {
-        calls.push(`start:${options.candidateRecordPath}:${options.stateDirectory}`);
+        calls.push(
+          `start:${options.candidateRecordPath}:${options.stateDirectory}:${options.modelStorageDirectory}`,
+        );
         return state;
       },
     }),
@@ -182,7 +185,7 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
   expect(start.code).toBe(0);
   expect(status.code).toBe(0);
   expect(stop.code).toBe(0);
-  expect(calls).toEqual(["start:/candidate/release-candidate.json:/state", "stop"]);
+  expect(calls).toEqual(["start:/candidate/release-candidate.json:/state:/models", "stop"]);
   expect(start.output.join("\n")).toContain('"model": null');
   expect(status.output.join("\n")).toContain('"listener": "127.0.0.1:39282"');
 });
@@ -511,7 +514,20 @@ macOSProcessTest(
     const root = await isolatedRoot();
     const stateDirectory = join(root, "state");
     const runtimeDirectory = join(root, "runtime");
-    await mkdir(runtimeDirectory, { recursive: true });
+    const modelStorageDirectory = join(root, "model-storage");
+    await Promise.all([
+      mkdir(runtimeDirectory, { recursive: true }),
+      mkdir(join(modelStorageDirectory, ".localhub-staging", "acquisition"), {
+        recursive: true,
+      }),
+    ]);
+    await Promise.all([
+      writeFile(join(modelStorageDirectory, "adoptable-unverified.gguf"), "unverified"),
+      writeFile(
+        join(modelStorageDirectory, ".localhub-staging", "acquisition", "partial.gguf"),
+        "partial",
+      ),
+    ]);
     const fakeLlama = join(runtimeDirectory, "llama-server");
     await writeFile(
       fakeLlama,
@@ -529,6 +545,24 @@ macOSProcessTest(
       bundle: bundle(fakeLlama),
       hostPort,
       llamaPort,
+      modelStorageDirectory,
+      inspectModels: async (path) => {
+        expect(path).toBe(modelStorageDirectory);
+        return [
+          {
+            id: "a".repeat(64),
+            displayName: "Exact Model",
+            available: true,
+            architecture: "qwen2",
+            parameterCount: 1,
+            quantization: { fileType: 1, tensorTypes: { F32: 1 } },
+            trainingContext: 2048,
+            templateHints: [],
+            files: [],
+            acquiredAt: "2026-07-27T00:00:00.000Z",
+          },
+        ];
+      },
       stateDirectory,
       startupDeadlineMs: 20_000,
       stopDeadlineMs: 2_000,
@@ -553,6 +587,14 @@ macOSProcessTest(
       },
     });
     expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
+    expect(
+      await fetch(`http://127.0.0.1:${llamaPort}/models`).then((response) => response.json()),
+    ).toEqual({ object: "list", data: [] });
+    expect(
+      await fetch(`http://127.0.0.1:${hostPort}/models`).then((response) => response.json()),
+    ).toMatchObject({
+      installedModels: [{ id: "a".repeat(64), displayName: "Exact Model", architecture: "qwen2" }],
+    });
 
     const stop = await fetch(`http://127.0.0.1:${hostPort}/stop`, {
       method: "POST",
@@ -1279,7 +1321,7 @@ function fakeLlamaSource(
   options: { healthStatus?: number; preflightLockPath?: string; versionDelayMs?: number } = {},
 ): string {
   return `#!/usr/bin/env bun
-import { rm, writeFile } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 const args = Bun.argv.slice(2);
 const lockPath = ${JSON.stringify(options.preflightLockPath ?? null)};
 const versionDelayMs = ${options.versionDelayMs ?? 0};
@@ -1307,13 +1349,23 @@ if (args.includes("--list-devices")) {
   process.exit(0);
 }
 const value = (name) => args[args.indexOf(name) + 1];
+async function ggufs(path) {
+  const found = [];
+  for (const entry of await readdir(path, { withFileTypes: true })) {
+    const child = path + "/" + entry.name;
+    if (entry.isDirectory()) found.push(...await ggufs(child));
+    else if (entry.name.toLowerCase().endsWith(".gguf")) found.push(child);
+  }
+  return found;
+}
 const server = Bun.serve({
   hostname: value("--host"),
   port: Number(value("--port")),
-  fetch(request) {
+  async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === "/health") return Response.json({ status: "ok" }, { status: ${options.healthStatus ?? 200} });
     if (path === "/slots") return Response.json([]);
+    if (path === "/models") return Response.json({ object: "list", data: await ggufs(value("--models-dir")) });
     return new Response("Not found", { status: 404 });
   },
 });

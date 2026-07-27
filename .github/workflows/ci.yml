@@ -98,6 +98,17 @@ jobs:
             dist/candidates/*/release-candidate.json \
             dist/evidence/t02-supervised-run.json
 
+      - name: Drive exact local model acquisition
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bun run candidate:model \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t04-local-model-acquisition.json
+          dist/candidates/*/lh evidence validate \
+            dist/candidates/*/release-candidate.json \
+            dist/evidence/t04-local-model-acquisition.json
+
       - name: Package and round-trip immutable candidate artifact
         if: always() && runner.os == 'macOS'
         shell: bash
@@ -122,6 +133,9 @@ jobs:
           "$extracted/lh" evidence validate \
             "$extracted/release-candidate.json" \
             dist/evidence/t02-supervised-run.json
+          "$extracted/lh" evidence validate \
+            "$extracted/release-candidate.json" \
+            dist/evidence/t04-local-model-acquisition.json
 
       - name: Retain candidate and sanitized evidence
         if: always() && runner.os == 'macOS'

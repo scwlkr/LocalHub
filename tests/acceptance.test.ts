@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import {
+  type AcceptanceDependencies,
   runCandidateSmoke,
   runLifecycleSmoke,
-  type AcceptanceDependencies,
+  runModelAcquisitionSmoke,
 } from "../src/acceptance.ts";
-import { validateEvidenceRecord, type EvidenceEnvironment } from "../src/evidence.ts";
+import { type EvidenceEnvironment, validateEvidenceRecord } from "../src/evidence.ts";
 import {
   RELEASE_CANDIDATE_SCHEMA,
   RELEASE_MANIFEST_SCHEMA,
@@ -119,6 +120,105 @@ test("the lifecycle driver proves detached start, fresh health, explicit stop, a
   expect(record.gates[0]).toMatchObject({ journeyGateId: "LH-J1-004", status: "Passed" });
 });
 
+test("the model acquisition driver keeps staged bytes out of inventory and proves exact Host adoption", async () => {
+  const commands: string[][] = [];
+  const source = new TextEncoder().encode("exact model bytes");
+  const sourceSha256 = "f8ee3ff497d6e851aaaf1be3c1b7013665dc4ff1288dfb04bda5ce98645d4043";
+  const contentId = "b".repeat(64);
+  const outputs = [
+    JSON.stringify({
+      id: "acquisition-1",
+      status: "planned",
+      requiredBytes: source.length,
+      files: [
+        {
+          transfer: "copy",
+          expectedSize: source.length,
+          receivedBytes: 0,
+          publishedSha256: sourceSha256,
+        },
+      ],
+    }),
+    "[]",
+    JSON.stringify({
+      id: contentId,
+      architecture: "qwen2",
+      parameterCount: 256,
+      quantization: { tensorTypes: { Q4_K: 1 } },
+      trainingContext: 4096,
+      templateHints: ["embedded"],
+      available: true,
+      files: [{ sha256: sourceSha256 }],
+    }),
+    JSON.stringify([{ id: contentId, available: true }]),
+    JSON.stringify({ id: contentId, displayName: "Acceptance Model Renamed" }),
+    JSON.stringify({
+      run: {
+        host: { origin: "http://127.0.0.1:39281" },
+        llama: { origin: "http://127.0.0.1:39282" },
+      },
+    }),
+    JSON.stringify({ status: "stopped" }),
+  ];
+  const candidate = verifiedCandidate();
+  const record = await runModelAcquisitionSmoke(
+    {
+      candidate,
+      candidateRecordPath: "/candidate/release-candidate.json",
+      executablePath: "/candidate/lh",
+      evidenceId: "t04-local-model-acquisition",
+      environment: { ...environment(), modelVariantHashes: [`sha256:${sourceSha256}`] },
+      seam: "assembled-release",
+      artifactLinks: ["https://github.com/scwlkr/LocalHub/issues/24"],
+      modelSourcePath: "/private/exact-model.gguf",
+      modelSourceSha256: sourceSha256,
+    },
+    {
+      process: {
+        run: async (command) => {
+          commands.push(command);
+          return { code: 0, stdout: outputs[commands.length - 1] ?? "", stderr: "" };
+        },
+      },
+      clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
+      storage: { read: async () => source },
+      network: {
+        fetch: async (request) =>
+          new URL(String(request)).port === "39282"
+            ? Response.json({ object: "list", data: [] })
+            : Response.json({ installedModels: [{ id: contentId, available: true }] }),
+      },
+      llamaCpp: { origin: "controlled" },
+      responses: { origin: "controlled" },
+      failure: { activate: async () => undefined },
+    },
+  );
+
+  expect(commands).toEqual([
+    [
+      "/candidate/lh",
+      "model",
+      "prepare",
+      "--name",
+      "Acceptance Model",
+      "--file",
+      "/private/exact-model.gguf",
+      "--sha256",
+      `/private/exact-model.gguf=${sourceSha256}`,
+    ],
+    ["/candidate/lh", "model", "list"],
+    ["/candidate/lh", "model", "import", "acquisition-1"],
+    ["/candidate/lh", "model", "list"],
+    ["/candidate/lh", "model", "rename", contentId, "Acceptance Model Renamed"],
+    ["/candidate/lh", "run", "start"],
+    ["/candidate/lh", "stop"],
+  ]);
+  expect(record.gates[0]).toMatchObject({ journeyGateId: "LH-J2-002", status: "Passed" });
+  expect(record.gates[0]?.observed).toContain(sourceSha256);
+  expect(record.gates[0]?.observed).toContain("sealed llama.cpp router inventory remained empty");
+  expect(JSON.stringify(record)).not.toContain("/private/");
+});
+
 test("failed lifecycle diagnostics name only sanitized steps and status categories", async () => {
   const diagnostics: string[] = [];
   const originalError = console.error;
@@ -178,6 +278,13 @@ test("the CI lifecycle evidence script does not claim a physical Host", async ()
   ).text();
   expect(script).toContain('networkLane: "macOS arm64 loopback lifecycle"');
   expect(script).not.toContain("Physical Apple-silicon Host");
+});
+
+test("model acquisition evidence gives deterministic and physical runs distinct identities", async () => {
+  const script = await Bun.file(
+    new URL("../scripts/run-model-acquisition-smoke.ts", import.meta.url),
+  ).text();
+  expect(script).toContain('physicalLocalSource ? "physical" : "deterministic"');
 });
 
 test("CI archives and round-trips candidate symlinks instead of uploading the raw tree", async () => {

@@ -1,28 +1,29 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type ChildProcess, spawn } from "node:child_process";
-import {
-  LLAMA_CPP_ARCHIVE_SHA256,
-  LLAMA_CPP_BUILD,
-  LLAMA_CPP_COMMIT,
-  verifyReleaseCandidate,
-  type FileIdentity,
-  type ReleaseAssetInspection,
-  type VerifiedReleaseCandidate,
-} from "./release.ts";
 import {
   createMemberBinding,
   createMemberGatewayHandler,
   isEligibleLanInterface,
+  type MemberBinding,
+  type PrivateInterface,
   reconcileMemberBinding,
   renderHostDashboard,
   renderStylesheet,
-  type MemberBinding,
-  type PrivateInterface,
 } from "./member-gateway.ts";
+import { type InstalledModel, inspectInstalledModels } from "./model-acquisition.ts";
+import {
+  type FileIdentity,
+  LLAMA_CPP_ARCHIVE_SHA256,
+  LLAMA_CPP_BUILD,
+  LLAMA_CPP_COMMIT,
+  type ReleaseAssetInspection,
+  type VerifiedReleaseCandidate,
+  verifyReleaseCandidate,
+} from "./release.ts";
 
 export const RUN_STATE_SCHEMA = "localhub.run-state/v1";
 export const DEFAULT_HOST_PORT = 39281;
@@ -145,7 +146,7 @@ export interface ServeRunOptions {
   stateDirectory: string;
   startupDeadlineMs: number;
   stopDeadlineMs: number;
-  modelsDirectory?: string;
+  modelStorageDirectory?: string;
   member?: MemberBinding;
   currentInterfaces?: () => PrivateInterface[];
   memberCheckIntervalMs?: number;
@@ -154,6 +155,7 @@ export interface ServeRunOptions {
   memberPeerAddress?: (request: Request) => string | null;
   beforeMemberVisit?: (route: "friendly" | "ipv4") => Promise<void>;
   publishBonjour?: (binding: MemberBinding) => Promise<BonjourPublication>;
+  inspectModels?: (modelStorageDirectory: string) => Promise<InstalledModel[]>;
 }
 
 interface InspectDependencies {
@@ -178,7 +180,7 @@ export interface RunCommandOptions {
   startupDeadlineMs?: number;
   stopDeadlineMs?: number;
   inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
-  modelsDirectory?: string;
+  modelStorageDirectory?: string;
   member?: RunMemberConfig;
 }
 
@@ -238,7 +240,7 @@ export function buildSupervisorLaunch(options: {
   llamaPort: number;
   logPath: string;
   stateDirectory: string;
-  modelsDirectory?: string;
+  modelStorageDirectory?: string;
   member?: RunMemberConfig;
 }): SupervisorLaunch {
   assertPort(options.hostPort, "Host control");
@@ -258,8 +260,8 @@ export function buildSupervisorLaunch(options: {
     "--llama-port",
     String(options.llamaPort),
   ];
-  if (options.modelsDirectory) {
-    command.push("--models-dir", options.modelsDirectory);
+  if (options.modelStorageDirectory) {
+    command.push("--model-storage", options.modelStorageDirectory);
   }
   if (options.member) {
     command.push(
@@ -506,7 +508,9 @@ export async function startLocalHubRun(options: RunCommandOptions): Promise<Loca
     llamaPort,
     logPath,
     stateDirectory: options.stateDirectory,
-    ...(options.modelsDirectory ? { modelsDirectory: options.modelsDirectory } : {}),
+    ...(options.modelStorageDirectory
+      ? { modelStorageDirectory: options.modelStorageDirectory }
+      : {}),
     ...(options.member ? { member: options.member } : {}),
   });
   const logDescriptor = openSync(logPath, "a", 0o600);
@@ -793,18 +797,21 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
   }
   await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
   await chmod(options.stateDirectory, 0o700);
-  const modelsDirectory = options.modelsDirectory ?? join(options.stateDirectory, "empty-models");
-  await mkdir(modelsDirectory, { recursive: true, mode: 0o700 });
+  const routerModelsDirectory = await mkdtemp(join(options.stateDirectory, "sealed-router-"));
+  await chmod(routerModelsDirectory, 0o700);
   const logPath = join(options.stateDirectory, "llama-server.log");
   const runId = randomUUID();
   const startedAt = new Date().toISOString();
-  const launch = buildLlamaLaunch(options.bundle, { modelsDirectory, port: options.llamaPort });
+  const launch = buildLlamaLaunch(options.bundle, {
+    modelsDirectory: routerModelsDirectory,
+    port: options.llamaPort,
+  });
   const publicLaunch = [
     `$CANDIDATE/${options.bundle.llama.binary.path}`,
     ...launch.command
       .slice(1)
       .map((argument) =>
-        argument === modelsDirectory ? "$LOCALHUB_STATE/empty-models" : argument,
+        argument === routerModelsDirectory ? "$LOCALHUB_STATE/sealed-router" : argument,
       ),
   ];
   let state: LocalHubRunState = {
@@ -1201,6 +1208,24 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         if (request.method === "GET" && url.pathname === "/health") {
           return Response.json(state);
         }
+        if (request.method === "GET" && url.pathname === "/models") {
+          try {
+            return Response.json({
+              installedModels: options.modelStorageDirectory
+                ? await (options.inspectModels ?? inspectInstalledModels)(
+                    options.modelStorageDirectory,
+                  )
+                : [],
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                error: `Installed Model inventory unavailable: ${errorMessage(error)}. No substitute inventory was used.`,
+              },
+              { status: 503 },
+            );
+          }
+        }
         if (request.method === "POST" && url.pathname === "/member/recheck") {
           if (request.headers.get("x-localhub-run-id") !== state.runId) {
             return Response.json(
@@ -1391,6 +1416,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
   } finally {
     process.off("SIGTERM", signalStop);
     process.off("SIGINT", signalStop);
+    await rm(routerModelsDirectory, { recursive: true, force: true });
   }
 }
 
@@ -1708,7 +1734,7 @@ function exactLlamaEnvironment(
   for (const name of ["PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEM_VERSION_COMPAT"]) {
     if (source[name] !== undefined) environment[name] = source[name];
   }
-  environment.LLAMA_CACHE = join(stateDirectory, "empty-models", "cache");
+  environment.LLAMA_CACHE = join(stateDirectory, "runtime-cache");
   return environment;
 }
 

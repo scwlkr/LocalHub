@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   EVIDENCE_SCHEMA,
   type EvidenceEnvironment,
@@ -45,6 +46,11 @@ export interface CandidateSmokeOptions {
   environment: EvidenceEnvironment;
   seam: EvidenceSeam;
   artifactLinks: string[];
+}
+
+export interface ModelAcquisitionSmokeOptions extends CandidateSmokeOptions {
+  modelSourcePath: string;
+  modelSourceSha256: string;
 }
 
 interface SmokeGate {
@@ -229,6 +235,229 @@ export async function runLifecycleSmoke(
     environment: options.environment,
     gates: [composite],
   };
+}
+
+export async function runModelAcquisitionSmoke(
+  options: ModelAcquisitionSmokeOptions,
+  dependencies: AcceptanceDependencies,
+): Promise<EvidenceRecord> {
+  const exactSource = await dependencies.storage.read(options.modelSourcePath);
+  let passedSteps =
+    sha256(exactSource) === options.modelSourceSha256 && exactSource.byteLength > 0 ? 1 : 0;
+  let installed: Record<string, unknown> | null = null;
+  let runAttempted = false;
+  let stopped = false;
+  try {
+    const prepared = jsonObjectResult(
+      await dependencies.process.run([
+        options.executablePath,
+        "model",
+        "prepare",
+        "--name",
+        "Acceptance Model",
+        "--file",
+        options.modelSourcePath,
+        "--sha256",
+        `${options.modelSourcePath}=${options.modelSourceSha256}`,
+      ]),
+    );
+    const acquisitionId = stringField(prepared, "id");
+    const plannedFiles = Array.isArray(prepared?.files) ? prepared.files : [];
+    const plannedFile = isRecord(plannedFiles[0]) ? plannedFiles[0] : null;
+    if (
+      acquisitionId &&
+      prepared?.status === "planned" &&
+      prepared.requiredBytes === exactSource.byteLength &&
+      plannedFiles.length === 1 &&
+      plannedFile?.transfer === "copy" &&
+      plannedFile.expectedSize === exactSource.byteLength &&
+      plannedFile.receivedBytes === 0 &&
+      plannedFile.publishedSha256 === options.modelSourceSha256
+    ) {
+      passedSteps += 1;
+    }
+
+    const stagedInventory = jsonResult(
+      await dependencies.process.run([options.executablePath, "model", "list"]),
+    );
+    if (Array.isArray(stagedInventory) && stagedInventory.length === 0) passedSteps += 1;
+
+    if (acquisitionId) {
+      installed = jsonObjectResult(
+        await dependencies.process.run([options.executablePath, "model", "import", acquisitionId]),
+      );
+    }
+    const contentId = stringField(installed, "id");
+    const files = Array.isArray(installed?.files) ? installed.files : [];
+    if (
+      contentId &&
+      /^[0-9a-f]{64}$/.test(contentId) &&
+      installed?.available === true &&
+      typeof installed.architecture === "string" &&
+      typeof installed.parameterCount === "number" &&
+      isRecord(installed.quantization) &&
+      isRecord(installed.quantization.tensorTypes) &&
+      Array.isArray(installed.templateHints) &&
+      files.length === 1 &&
+      isRecord(files[0]) &&
+      files[0].sha256 === options.modelSourceSha256
+    ) {
+      passedSteps += 1;
+    }
+
+    const installedInventory = jsonResult(
+      await dependencies.process.run([options.executablePath, "model", "list"]),
+    );
+    if (
+      contentId &&
+      Array.isArray(installedInventory) &&
+      installedInventory.length === 1 &&
+      isRecord(installedInventory[0]) &&
+      installedInventory[0].id === contentId &&
+      installedInventory[0].available === true
+    ) {
+      passedSteps += 1;
+    }
+
+    if (contentId) {
+      const renamed = jsonObjectResult(
+        await dependencies.process.run([
+          options.executablePath,
+          "model",
+          "rename",
+          contentId,
+          "Acceptance Model Renamed",
+        ]),
+      );
+      if (renamed?.id === contentId && renamed.displayName === "Acceptance Model Renamed") {
+        passedSteps += 1;
+      }
+    }
+
+    runAttempted = true;
+    const started = jsonObjectResult(
+      await dependencies.process.run([options.executablePath, "run", "start"]),
+    );
+    const run = isRecord(started?.run) ? started.run : null;
+    const host = isRecord(run?.host) ? run.host : null;
+    const llama = isRecord(run?.llama) ? run.llama : null;
+    const origin = stringField(host, "origin");
+    const llamaOrigin = stringField(llama, "origin");
+    if (origin && contentId) {
+      const response = await dependencies.network.fetch(`${origin}/models`);
+      const body: unknown = response.ok ? await response.json() : null;
+      const models =
+        isRecord(body) && Array.isArray(body.installedModels) ? body.installedModels : [];
+      if (
+        models.length === 1 &&
+        isRecord(models[0]) &&
+        models[0].id === contentId &&
+        models[0].available === true
+      ) {
+        passedSteps += 1;
+      }
+    }
+    if (llamaOrigin) {
+      const response = await dependencies.network.fetch(`${llamaOrigin}/models`);
+      const body: unknown = response.ok ? await response.json() : null;
+      if (emptyRouterInventory(body)) passedSteps += 1;
+    }
+
+    const stoppedResult = jsonObjectResult(
+      await dependencies.process.run([options.executablePath, "stop"]),
+    );
+    stopped = stoppedResult?.status === "stopped";
+    const finalSource = await dependencies.storage.read(options.modelSourcePath);
+    if (stopped && sha256(finalSource) === options.modelSourceSha256) passedSteps += 1;
+  } catch {
+    // This composite gate fails without retaining raw output, local paths, or Host data.
+  } finally {
+    if (runAttempted && !stopped) {
+      try {
+        await dependencies.process.run([options.executablePath, "stop"]);
+      } catch {
+        // A failed cleanup remains part of the failed composite result.
+      }
+    }
+  }
+
+  const passed = passedSteps === 9;
+  const contentId = stringField(installed, "id");
+  const architecture = stringField(installed, "architecture");
+  const parameterCount = numberField(installed, "parameterCount");
+  const trainingContext = numberField(installed, "trainingContext");
+  const tensorTypes = isRecord(installed?.quantization) ? installed.quantization.tensorTypes : null;
+  const templateHints = Array.isArray(installed?.templateHints) ? installed.templateHints : [];
+  const composite: EvidenceGate = {
+    journeyGateId: "LH-J2-002",
+    requirementIds: ["LH-MOD-006", "LH-MOD-007"],
+    classification: "Mandatory",
+    status: passed ? "Passed" : "Failed",
+    action:
+      "$CANDIDATE/lh model prepare exact local GGUF with published SHA-256; $CANDIDATE/lh model list; $CANDIDATE/lh model import; $CANDIDATE/lh model list; label-only rename; $CANDIDATE/lh run start; GET loopback Host /models; GET pinned llama.cpp /models; $CANDIDATE/lh stop",
+    expected:
+      "The exact staged local file remains absent from Installed Model inventory until offline SHA-256 and GGUF verification complete, then one content-identified model appears atomically in both shipped CLI and loopback Host inventory without changing the source, while the pinned llama.cpp router inventory stays empty.",
+    observed: passed
+      ? `Exact source sha256:${options.modelSourceSha256} remained unchanged; content identity ${contentId}; architecture ${architecture}; ${parameterCount} parameters; training context ${trainingContext ?? "not declared"}; ${isRecord(tensorTypes) ? Object.keys(tensorTypes).length : 0} tensor layouts and ${templateHints.length} embedded template hints parsed; staged inventory was empty, one exact Installed Model became available through loopback Host inventory, and the sealed llama.cpp router inventory remained empty.`
+      : `${passedSteps} of 9 exact local acquisition checks passed; raw command output, local paths, and Host data were not retained.`,
+    artifactLinks: options.artifactLinks,
+    tester: "LocalHub exact local model acquisition driver",
+    timestamp: dependencies.clock.now().toISOString(),
+    priorAttempts: [],
+  };
+  return {
+    schema: EVIDENCE_SCHEMA,
+    evidenceId: options.evidenceId,
+    seam: options.seam,
+    candidate: {
+      candidateId: options.candidate.candidate.candidateId,
+      commit: options.candidate.manifest.release.commit,
+      assetSha256: options.candidate.candidate.asset.sha256,
+      manifestSha256: options.candidate.candidate.manifest.sha256,
+    },
+    environment: options.environment,
+    gates: [composite],
+  };
+}
+
+function jsonResult(result: AcceptanceProcessResult): Record<string, unknown> | unknown[] | null {
+  if (result.code !== 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    return isRecord(parsed) || Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function jsonObjectResult(result: AcceptanceProcessResult): Record<string, unknown> | null {
+  const parsed = jsonResult(result);
+  return isRecord(parsed) ? parsed : null;
+}
+
+function stringField(value: unknown, key: string): string | null {
+  return isRecord(value) && typeof value[key] === "string" ? value[key] : null;
+}
+
+function numberField(value: unknown, key: string): number | null {
+  return isRecord(value) && typeof value[key] === "number" ? value[key] : null;
+}
+
+function emptyRouterInventory(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.object === "list" &&
+    Array.isArray(value.data) &&
+    value.data.length === 0
+  );
+}
+
+function sha256(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function lifecycleStatusCategory(result: AcceptanceProcessResult): string {
