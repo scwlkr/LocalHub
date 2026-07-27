@@ -48,6 +48,7 @@ export interface CandidateSmokeOptions {
 }
 
 interface SmokeGate {
+  label?: string;
   command: string[];
   passed(result: AcceptanceProcessResult): boolean;
 }
@@ -125,6 +126,7 @@ export async function runLifecycleSmoke(
 ): Promise<EvidenceRecord> {
   const gates: SmokeGate[] = [
     {
+      label: "start",
       command: [options.executablePath, "run", "start"],
       passed: (result) =>
         result.code === 0 &&
@@ -133,6 +135,7 @@ export async function runLifecycleSmoke(
         result.stdout.includes('"builtInTools": false'),
     },
     {
+      label: "running-status",
       command: [options.executablePath, "run", "status"],
       passed: (result) =>
         result.code === 0 &&
@@ -140,6 +143,7 @@ export async function runLifecycleSmoke(
         result.stdout.includes('"health": "ready"'),
     },
     {
+      label: "stop",
       command: [options.executablePath, "stop"],
       passed: (result) =>
         result.code === 0 &&
@@ -147,6 +151,7 @@ export async function runLifecycleSmoke(
         result.stdout.includes('"activeWork": 0'),
     },
     {
+      label: "stopped-status",
       command: [options.executablePath, "run", "status"],
       passed: (result) =>
         result.code === 0 &&
@@ -159,9 +164,15 @@ export async function runLifecycleSmoke(
   for (const gate of gates) {
     try {
       const result = await dependencies.process.run(gate.command);
-      if (gate.passed(result)) passedSteps += 1;
+      if (gate.passed(result)) {
+        passedSteps += 1;
+      } else {
+        console.error(
+          `Lifecycle step ${gate.label}: ${result.code === 0 ? "status-mismatch" : "exit-nonzero"}; raw output withheld.`,
+        );
+      }
     } catch {
-      // Raw process output is intentionally excluded from sanitized release evidence.
+      console.error(`Lifecycle step ${gate.label}: invocation-error; raw output withheld.`);
     }
   }
   if (passedSteps < 3) {

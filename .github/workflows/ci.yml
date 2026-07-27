@@ -97,7 +97,7 @@ jobs:
             dist/evidence/t02-supervised-run.json
 
       - name: Retain candidate and sanitized evidence
-        if: runner.os == 'macOS'
+        if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: localhub-macos-arm64-${{ github.sha }}

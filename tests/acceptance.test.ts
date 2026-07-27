@@ -115,6 +115,52 @@ test("the lifecycle driver proves detached start, fresh health, explicit stop, a
   expect(record.gates[0]).toMatchObject({ journeyGateId: "LH-J1-004", status: "Passed" });
 });
 
+test("failed lifecycle diagnostics name only sanitized steps and status categories", async () => {
+  const diagnostics: string[] = [];
+  const originalError = console.error;
+  console.error = (...values: unknown[]) => diagnostics.push(values.map(String).join(" "));
+  let record: Awaited<ReturnType<typeof runLifecycleSmoke>> | undefined;
+  try {
+    record = await runLifecycleSmoke(
+      {
+        candidate: verifiedCandidate(),
+        candidateRecordPath: "/private/candidate/release-candidate.json",
+        executablePath: "/private/candidate/lh",
+        evidenceId: "t02-failed-lifecycle",
+        environment: environment(),
+        seam: "assembled-release",
+        artifactLinks: ["https://github.com/scwlkr/LocalHub/issues/22"],
+      },
+      {
+        process: {
+          run: async () => ({
+            code: 1,
+            stdout: "private-machine.local secret raw output",
+            stderr: "/private/path",
+          }),
+        },
+        clock: { now: () => new Date("2026-07-27T20:00:00.000Z") },
+        storage: { read: async () => new Uint8Array() },
+        network: { fetch },
+        llamaCpp: { origin: "controlled" },
+        responses: { origin: "controlled" },
+        failure: { activate: async () => undefined },
+      },
+    );
+  } finally {
+    console.error = originalError;
+  }
+
+  expect(diagnostics).toEqual([
+    "Lifecycle step start: exit-nonzero; raw output withheld.",
+    "Lifecycle step running-status: exit-nonzero; raw output withheld.",
+    "Lifecycle step stop: exit-nonzero; raw output withheld.",
+    "Lifecycle step stopped-status: exit-nonzero; raw output withheld.",
+  ]);
+  expect(JSON.stringify(record)).not.toContain("private-machine.local");
+  expect(record?.gates[0]?.status).toBe("Failed");
+});
+
 test("the CI lifecycle evidence script does not claim a physical Host", async () => {
   const script = await Bun.file(
     new URL("../scripts/run-lifecycle-smoke.ts", import.meta.url),

@@ -15,6 +15,7 @@ import {
 } from "../src/run.ts";
 
 const testRoots: string[] = [];
+const macOSProcessTest = process.platform === "darwin" ? test : test.skip;
 
 afterEach(async () => {
   for (const path of testRoots.splice(0)) {
@@ -211,143 +212,159 @@ test("stop preserves a failed Host when its recorded identity is not proven", as
   }
 });
 
-test("the real supervisor boundary reaches health, reports no model proof, then closes both listeners", async () => {
-  const root = await isolatedRoot();
-  const stateDirectory = join(root, "state");
-  const runtimeDirectory = join(root, "runtime");
-  await mkdir(runtimeDirectory, { recursive: true });
-  const fakeLlama = join(runtimeDirectory, "llama-server");
-  await writeFile(fakeLlama, fakeLlamaSource({ preflightLockPath: join(root, "preflight.lock") }), {
-    mode: 0o755,
-  });
-  const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
+macOSProcessTest(
+  "the real macOS supervisor boundary reaches health, reports no model proof, then closes both listeners",
+  async () => {
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(
+      fakeLlama,
+      fakeLlamaSource({ preflightLockPath: join(root, "preflight.lock") }),
+      {
+        mode: 0o755,
+      },
+    );
+    const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
 
-  const supervisor = serveLocalHubRun({
-    bundle: bundle(fakeLlama),
-    hostPort,
-    llamaPort,
-    stateDirectory,
-    startupDeadlineMs: 2_000,
-    stopDeadlineMs: 2_000,
-  });
-  const running = await waitForState(stateDirectory, "running");
-  const health = await fetch(`http://127.0.0.1:${hostPort}/health`).then((response) =>
-    response.json(),
-  );
-
-  expect(health).toMatchObject({
-    schema: RUN_STATE_SCHEMA,
-    status: "running",
-    acceptingWork: true,
-    llama: {
-      build: "b10107",
-      architecture: "arm64",
-      health: "ready",
-      model: null,
-      runProfile: null,
-      builtInTools: false,
-      builtInAgent: false,
-    },
-  });
-  expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
-
-  const stop = await fetch(`http://127.0.0.1:${hostPort}/stop`, {
-    method: "POST",
-    headers: { "x-localhub-run-id": running.runId },
-  });
-  expect(await stop.json()).toMatchObject({ acceptingWork: false, activeWork: 0 });
-  await supervisor;
-  const stopped = await waitForState(stateDirectory, "stopped");
-  expect(stopped.stop).toMatchObject({ activeWork: 0, forcedProcesses: [] });
-  await expect(fetch(`http://127.0.0.1:${hostPort}/health`)).rejects.toThrow();
-  await expect(fetch(`http://127.0.0.1:${llamaPort}/health`)).rejects.toThrow();
-});
-
-test("hung llama health fails once with one repair and no hidden restart", async () => {
-  const root = await isolatedRoot();
-  const stateDirectory = join(root, "state");
-  const runtimeDirectory = join(root, "runtime");
-  await mkdir(runtimeDirectory, { recursive: true });
-  const fakeLlama = join(runtimeDirectory, "llama-server");
-  await writeFile(fakeLlama, fakeLlamaSource({ healthStatus: 503 }), { mode: 0o755 });
-  const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
-
-  await expect(
-    serveLocalHubRun({
+    const supervisor = serveLocalHubRun({
       bundle: bundle(fakeLlama),
       hostPort,
       llamaPort,
       stateDirectory,
-      startupDeadlineMs: 500,
-      stopDeadlineMs: 500,
-    }),
-  ).rejects.toThrow("did not become healthy");
-  const failed = await waitForState(stateDirectory, "failed");
-  expect(failed.failure).toMatchObject({
-    protectedState: expect.stringContaining("No model"),
-    repair: expect.stringContaining("pinned llama.cpp runtime"),
-    recheck: "Run `lh run start`, then `lh run status`.",
-  });
-  expect(failed.restartAttempts).toBe(0);
-});
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 2_000,
+    });
+    const running = await waitForState(stateDirectory, "running");
+    const health = await fetch(`http://127.0.0.1:${hostPort}/health`).then((response) =>
+      response.json(),
+    );
 
-test("a worker crash fails closed with no hidden restart or orphan listener", async () => {
-  const root = await isolatedRoot();
-  const stateDirectory = join(root, "state");
-  const runtimeDirectory = join(root, "runtime");
-  await mkdir(runtimeDirectory, { recursive: true });
-  const fakeLlama = join(runtimeDirectory, "llama-server");
-  await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
-  const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
+    expect(health).toMatchObject({
+      schema: RUN_STATE_SCHEMA,
+      status: "running",
+      acceptingWork: true,
+      llama: {
+        build: "b10107",
+        architecture: "arm64",
+        health: "ready",
+        model: null,
+        runProfile: null,
+        builtInTools: false,
+        builtInAgent: false,
+      },
+    });
+    expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
 
-  const crashed = serveLocalHubRun({
-    bundle: bundle(fakeLlama),
-    hostPort,
-    llamaPort,
-    stateDirectory,
-    startupDeadlineMs: 2_000,
-    stopDeadlineMs: 500,
-  });
-  const initial = await withDeadline(
-    waitForState(stateDirectory, "running"),
-    "waiting for initial running state",
-  );
-  if (initial.llama.pid === null) throw new Error("Missing fake llama.cpp PID.");
-  process.kill(initial.llama.pid, "SIGKILL");
-  const failed = await withDeadline(
-    waitForState(stateDirectory, "failed"),
-    "waiting for crash failure state",
-  );
-  expect(failed.restartAttempts).toBe(0);
-  expect(failed.acceptingWork).toBe(false);
-  expect(failed.failure?.repair).toContain("run `lh stop`");
-  const stoppedByPublicCommand = await withDeadline(
-    captureOutput(() =>
-      main(["stop"], {
-        runStateDirectory: stateDirectory,
-        stopRun: (options) =>
-          stopLocalHubRun({
-            ...options,
-            stopDeadlineMs: 500,
-            processAlive: (pid) => (pid === process.pid ? false : processIsAlive(pid)),
-          }),
+    const stop = await fetch(`http://127.0.0.1:${hostPort}/stop`, {
+      method: "POST",
+      headers: { "x-localhub-run-id": running.runId },
+    });
+    expect(await stop.json()).toMatchObject({ acceptingWork: false, activeWork: 0 });
+    await supervisor;
+    const stopped = await waitForState(stateDirectory, "stopped");
+    expect(stopped.stop).toMatchObject({ activeWork: 0, forcedProcesses: [] });
+    await expect(fetch(`http://127.0.0.1:${hostPort}/health`)).rejects.toThrow();
+    await expect(fetch(`http://127.0.0.1:${llamaPort}/health`)).rejects.toThrow();
+  },
+);
+
+macOSProcessTest(
+  "hung macOS llama health fails once with one repair and no hidden restart",
+  async () => {
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(fakeLlama, fakeLlamaSource({ healthStatus: 503 }), { mode: 0o755 });
+    const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
+
+    await expect(
+      serveLocalHubRun({
+        bundle: bundle(fakeLlama),
+        hostPort,
+        llamaPort,
+        stateDirectory,
+        startupDeadlineMs: 500,
+        stopDeadlineMs: 500,
       }),
-    ),
-    "running public stop after crash",
-  );
-  expect(stoppedByPublicCommand.code).toBe(0);
-  expect(stoppedByPublicCommand.output.join("\n")).toContain('"status": "stopped"');
-  await withDeadline(crashed, "awaiting supervisor cleanup after crash stop");
-  await withDeadline(waitForListenerClosed(initial.host.origin), "closing crashed Host listener");
-  await withDeadline(waitForListenerClosed(initial.llama.origin), "closing crashed llama listener");
-  const final = await withDeadline(
-    waitForState(stateDirectory, "stopped"),
-    "waiting for final stopped state",
-  );
-  expect(final.host.health).toBe("closed");
-  expect(final.llama.health).toBe("closed");
-  expect(final.stop).toEqual({ activeWork: 0, forcedProcesses: [] });
-});
+    ).rejects.toThrow("did not become healthy");
+    const failed = await waitForState(stateDirectory, "failed");
+    expect(failed.failure).toMatchObject({
+      protectedState: expect.stringContaining("No model"),
+      repair: expect.stringContaining("pinned llama.cpp runtime"),
+      recheck: "Run `lh run start`, then `lh run status`.",
+    });
+    expect(failed.restartAttempts).toBe(0);
+  },
+);
+
+macOSProcessTest(
+  "a macOS worker crash fails closed with no hidden restart or orphan listener",
+  async () => {
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+    const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
+
+    const crashed = serveLocalHubRun({
+      bundle: bundle(fakeLlama),
+      hostPort,
+      llamaPort,
+      stateDirectory,
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 500,
+    });
+    const initial = await withDeadline(
+      waitForState(stateDirectory, "running"),
+      "waiting for initial running state",
+    );
+    if (initial.llama.pid === null) throw new Error("Missing fake llama.cpp PID.");
+    process.kill(initial.llama.pid, "SIGKILL");
+    const failed = await withDeadline(
+      waitForState(stateDirectory, "failed"),
+      "waiting for crash failure state",
+    );
+    expect(failed.restartAttempts).toBe(0);
+    expect(failed.acceptingWork).toBe(false);
+    expect(failed.failure?.repair).toContain("run `lh stop`");
+    const stoppedByPublicCommand = await withDeadline(
+      captureOutput(() =>
+        main(["stop"], {
+          runStateDirectory: stateDirectory,
+          stopRun: (options) =>
+            stopLocalHubRun({
+              ...options,
+              stopDeadlineMs: 500,
+              processAlive: (pid) => (pid === process.pid ? false : processIsAlive(pid)),
+            }),
+        }),
+      ),
+      "running public stop after crash",
+    );
+    expect(stoppedByPublicCommand.code).toBe(0);
+    expect(stoppedByPublicCommand.output.join("\n")).toContain('"status": "stopped"');
+    await withDeadline(crashed, "awaiting supervisor cleanup after crash stop");
+    await withDeadline(waitForListenerClosed(initial.host.origin), "closing crashed Host listener");
+    await withDeadline(
+      waitForListenerClosed(initial.llama.origin),
+      "closing crashed llama listener",
+    );
+    const final = await withDeadline(
+      waitForState(stateDirectory, "stopped"),
+      "waiting for final stopped state",
+    );
+    expect(final.host.health).toBe("closed");
+    expect(final.llama.health).toBe("closed");
+    expect(final.stop).toEqual({ activeWork: 0, forcedProcesses: [] });
+  },
+);
 
 function bundle(llamaServerPath: string): RunBundle {
   return {

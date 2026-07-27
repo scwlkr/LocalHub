@@ -719,7 +719,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     const startupDeadline = Date.now() + options.startupDeadlineMs;
     const versionOutput = await runFinite(
       [options.bundle.llama.binaryPath, "--version"],
-      remainingDeadline(startupDeadline, 5_000),
+      remainingDeadline(startupDeadline, 15_000),
     );
     const deviceOutput = await runFinite(
       [options.bundle.llama.binaryPath, "--list-devices"],
