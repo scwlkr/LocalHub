@@ -212,6 +212,103 @@ test("stop preserves a failed Host when its recorded identity is not proven", as
   }
 });
 
+test("a timed-out stop never signals a process without a fresh ownership proof", async () => {
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  await mkdir(stateDirectory, { recursive: true });
+  let stopRequests = 0;
+  let state = runningState();
+  const host = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      if (request.method === "POST" && new URL(request.url).pathname === "/stop") {
+        stopRequests += 1;
+        return Response.json({ acceptingWork: false, activeWork: 3 });
+      }
+      return Response.json(state);
+    },
+  });
+  const origin = `http://127.0.0.1:${host.port}`;
+  state = {
+    ...state,
+    supervisor: { ...state.supervisor, pid: 424_242 },
+    host: { origin, health: "ready" },
+    llama: { ...state.llama, origin, listener: new URL(origin).host },
+  };
+  await writeRunState(stateDirectory, state);
+  const signals: Array<{ pid: number; signal: NodeJS.Signals | number | undefined }> = [];
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    signals.push({ pid, signal });
+    return true;
+  }) as typeof process.kill;
+  try {
+    await expect(
+      stopLocalHubRun({ stateDirectory, stopDeadlineMs: 1, processAlive: () => true }),
+    ).rejects.toThrow("exceeded its finite process/listener deadline");
+  } finally {
+    process.kill = originalKill;
+    await host.stop(true);
+  }
+
+  expect(stopRequests).toBe(1);
+  expect(signals).toEqual([]);
+  expect(await readFile(join(stateDirectory, "run-state.json"), "utf8")).toContain(
+    '"status": "running"',
+  );
+});
+
+macOSProcessTest("listener ownership inspection ignores a hostile PATH lsof", async () => {
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  const runtimeDirectory = join(root, "runtime");
+  const hostileBin = join(root, "hostile-bin");
+  await Promise.all([
+    mkdir(runtimeDirectory, { recursive: true }),
+    mkdir(hostileBin, { recursive: true }),
+  ]);
+  const fakeLlama = join(runtimeDirectory, "llama-server");
+  const hostileLsof = join(hostileBin, "lsof");
+  await Promise.all([
+    writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 }),
+    writeFile(
+      hostileLsof,
+      '#!/bin/sh\nprintf "invoked\\n" >> "$0.invoked"\nexec /usr/sbin/lsof "$@"\n',
+      { mode: 0o755 },
+    ),
+  ]);
+  const [hostPort, llamaPort] = await Promise.all([availablePort(), availablePort()]);
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${hostileBin}:${originalPath ?? ""}`;
+  let hostileInspectorRan = false;
+  let running: LocalHubRunState | null = null;
+  const supervisor = serveLocalHubRun({
+    bundle: bundle(fakeLlama),
+    hostPort,
+    llamaPort,
+    stateDirectory,
+    startupDeadlineMs: 2_000,
+    stopDeadlineMs: 500,
+  });
+  try {
+    running = await waitForState(stateDirectory, "running");
+    hostileInspectorRan = await Bun.file(`${hostileLsof}.invoked`).exists();
+  } finally {
+    if (running) {
+      await fetch(`${running.host.origin}/stop`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+    }
+    await supervisor;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+
+  expect(hostileInspectorRan).toBe(false);
+});
+
 macOSProcessTest(
   "the real macOS boundary tolerates a serialized version probe beyond fifteen seconds",
   async () => {

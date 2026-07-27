@@ -562,13 +562,10 @@ export async function stopLocalHubRun(options: {
     }
     await Bun.sleep(25);
   }
-  if (inspection.run.supervisor.pid > 1) {
-    process.kill(inspection.run.supervisor.pid, "SIGTERM");
-  }
   throw new RunCommandError(
     runFailure(
       "Stop LocalHub exceeded its finite process/listener deadline after rejecting new work.",
-      "No model, LM Studio process, configuration, or source file was touched; no substitute service started.",
+      "No process was signalled after the deadline; no model, LM Studio process, configuration, or source file was touched; no substitute service started.",
       "The recorded state and logs remain available for inspection.",
       "Inspect the recorded LocalHub-owned PIDs and loopback listeners, then retry `lh stop`.",
       "Run `lh run status` again.",
@@ -1110,7 +1107,10 @@ async function runFinite(command: string[], deadlineMs: number): Promise<string>
 
 async function verifyListenerOwner(port: number, expectedPid: number | undefined): Promise<void> {
   if (!expectedPid) throw new Error(`listener ${port} has no recorded owner process`);
-  const output = await runFinite(["lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], 2_000);
+  const output = await runFinite(
+    ["/usr/sbin/lsof", "-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+    2_000,
+  );
   const owners = [...new Set(output.split(/\s+/).filter(Boolean).map(Number))];
   if (owners.length !== 1 || owners[0] !== expectedPid) {
     throw new Error(`listener ${port} is not owned only by the recorded LocalHub process`);
