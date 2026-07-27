@@ -32,6 +32,7 @@ import {
 } from "./profile-worker.ts";
 import { type ReleaseAssetInspection, verifyReleaseCandidate } from "./release.ts";
 import {
+  acceptSharedModelRequest,
   createRunProfile,
   inspectRunProfiles,
   publishSharedModel,
@@ -106,6 +107,8 @@ Usage:
                      Apply one explicit Shared Model transition
   lh shared replace <shared-model-id> <revision-id>
                      Affect only new work with one exact passing replacement
+  lh shared target <shared-model-id>
+                     Freeze the exact target recorded for one newly accepted request
   lh shared list     Inspect Shared Models and their exact revisions
   lh release identity <release-candidate.json>
                      Verify and print the exact assembled candidate identity
@@ -770,6 +773,7 @@ type ProfileCommand =
     }
   | { kind: "shared-transition"; transition: "pin" | "unpin" | "share" | "unshare"; id: string }
   | { kind: "shared-replace"; id: string; revisionId: string }
+  | { kind: "shared-target"; id: string }
   | { kind: "shared-list" };
 
 function parseProfileCommand(args: string[]): ProfileCommand | "invalid" | null {
@@ -836,6 +840,9 @@ function parseProfileCommand(args: string[]): ProfileCommand | "invalid" | null 
   }
   if (args.length === 4 && args[1] === "replace") {
     return { kind: "shared-replace", id: args[2] ?? "", revisionId: args[3] ?? "" };
+  }
+  if (args.length === 3 && args[1] === "target") {
+    return { kind: "shared-target", id: args[2] ?? "" };
   }
   if (args[1] !== "publish") return "invalid";
   const options = uniqueOptions(args, 2, [
@@ -968,6 +975,8 @@ async function runProfileCommand(
       );
     case "shared-replace":
       return await replaceSharedModel(context.storagePath, command.id, command.revisionId);
+    case "shared-target":
+      return await acceptSharedModelRequest(context.storagePath, command.id);
     case "shared-list":
       return (await inspectRunProfiles(context.storagePath)).sharedModels;
   }
