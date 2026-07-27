@@ -284,6 +284,23 @@ export async function verifyReleaseCandidate(
   executablePath: string,
   options: ReleaseVerificationOptions,
 ): Promise<VerifiedReleaseCandidate> {
+  return await verifyReleaseCandidateInternal(candidatePath, executablePath, options, true);
+}
+
+export async function verifyReleaseCandidateForRecovery(
+  candidatePath: string,
+  executablePath: string,
+  options: ReleaseVerificationOptions,
+): Promise<VerifiedReleaseCandidate> {
+  return await verifyReleaseCandidateInternal(candidatePath, executablePath, options, false);
+}
+
+async function verifyReleaseCandidateInternal(
+  candidatePath: string,
+  executablePath: string,
+  options: ReleaseVerificationOptions,
+  verifyRuntime: boolean,
+): Promise<VerifiedReleaseCandidate> {
   const candidate = JSON.parse(await readFile(candidatePath, "utf8")) as ReleaseCandidate;
   validateCandidateRecord(candidate);
 
@@ -320,7 +337,7 @@ export async function verifyReleaseCandidate(
   }
 
   verifyDependencyPins(manifest);
-  await verifyRuntimeInventory(candidateDirectory, manifest);
+  if (verifyRuntime) await verifyRuntimeInventory(candidateDirectory, manifest);
   if (options.buildCommit !== manifest.release.commit) {
     throw new Error("Executing asset build commit does not match the candidate source commit.");
   }

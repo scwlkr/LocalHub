@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { buildCodexProcess, runCodex } from "./codex.ts";
 import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
@@ -24,7 +25,31 @@ import {
 } from "./model-acquisition.ts";
 import { THIRD_PARTY_NOTICES } from "./notices.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
-import { type ReleaseAssetInspection, verifyReleaseCandidate } from "./release.ts";
+import {
+  findProfileWorkerPort,
+  inspectCurrentProfileBinding,
+  runProfileWorker,
+  type RunProfileWorkerOptions,
+} from "./profile-worker.ts";
+import {
+  type ReleaseAssetInspection,
+  verifyReleaseCandidate,
+  verifyReleaseCandidateForRecovery,
+} from "./release.ts";
+import {
+  acceptSharedModelRequest,
+  createRunProfile,
+  inspectRunProfiles,
+  publishSharedModel,
+  replaceSharedModel,
+  reviseRunProfile,
+  setSharedModelPin,
+  setSharedModelPublished,
+  testRunProfile,
+  type RunProfileControls,
+  type CurrentProfileBinding,
+  type RunProfileRuntime,
+} from "./run-profile.ts";
 import {
   currentPrivateInterfaces,
   defaultRunStateDirectory,
@@ -71,6 +96,26 @@ Usage:
                      Change only an Installed Model display name
   lh model discard <acquisition-id>
                      Discard only non-installed staged acquisition bytes
+  lh profile create --name <label> --model <content-id>
+                    --template-sha256 <digest> --context <tokens>
+                    --slots <count> --gpu-layers <count> --threads <count>
+                     Create one immutable exact, untested Run Profile revision
+  lh profile revise <revision-id> --context <tokens>
+                     Edit a bound input as a new untested revision
+  lh profile test <revision-id>
+                     Run real loopback llama.cpp proof with automatic fitting off
+  lh profile list    Inspect exact commands, separate estimates, and Profile Results
+  lh shared publish --name <label> --revision <revision-id>
+                    --context-limit <tokens> --output-limit <tokens>
+                    --concurrency <count>
+                     Publish one passing text Shared Model with Member limits
+  lh shared pin|unpin|share|unshare <shared-model-id>
+                     Apply one explicit Shared Model transition
+  lh shared replace <shared-model-id> <revision-id>
+                     Affect only new work with one exact passing replacement
+  lh shared target <shared-model-id>
+                     Freeze the exact target recorded for one newly accepted request
+  lh shared list     Inspect Shared Models and their exact revisions
   lh release identity <release-candidate.json>
                      Verify and print the exact assembled candidate identity
   lh release notices  Print bundled third-party license notices
@@ -119,6 +164,10 @@ export interface CliDependencies {
   runFirstRun?: (options: FirstRunCommandOptions) => Promise<"ready" | "cancelled">;
   recheckMember?: typeof recheckMemberLink;
   modelStoragePath?: string;
+  profileRuntime?: { runtime: RunProfileRuntime; binaryPath: string };
+  profileBinding?: CurrentProfileBinding;
+  profilePort?: () => Promise<number>;
+  runProfileTestWorker?: (options: RunProfileWorkerOptions) => ReturnType<typeof runProfileWorker>;
 }
 
 export interface FirstRunCommandOptions {
@@ -228,6 +277,69 @@ export async function main(
       return 0;
     } catch (error) {
       console.error(`Model command failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+  const profileCommand = parseProfileCommand(args);
+  if (profileCommand === "invalid") {
+    console.error("Invalid profile/shared command. Run `lh --help`.");
+    return 2;
+  }
+  if (profileCommand) {
+    try {
+      const recoveryCommand = isRecoveryProfileCommand(profileCommand);
+      const storagePath =
+        dependencies.modelStoragePath ??
+        (await (recoveryCommand ? configuredModelStorageForRecovery : configuredModelStorage)({
+          buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+          candidateRecordPath,
+          executablePath,
+          firstRunStatePath:
+            dependencies.firstRunStatePath ??
+            defaultFirstRunStatePath(dependencies.env ?? process.env),
+          ...(dependencies.inspectReleaseAsset
+            ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+            : {}),
+        }));
+      let runtime: { runtime: RunProfileRuntime; binaryPath: string } | undefined;
+      let currentBinding = dependencies.profileBinding;
+      if (!isOfflineRecoveryTransition(profileCommand)) {
+        try {
+          runtime =
+            dependencies.profileRuntime ??
+            (await configuredProfileRuntime({
+              buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+              candidateRecordPath,
+              executablePath,
+              ...(dependencies.inspectReleaseAsset
+                ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+                : {}),
+            }));
+          currentBinding ??= await inspectCurrentProfileBinding(
+            runtime.binaryPath,
+            runtime.runtime,
+          );
+        } catch (error) {
+          if (!isRecoveryListCommand(profileCommand)) throw error;
+          currentBinding = {
+            available: false,
+            cause: `Exact current runtime or Host binding is unavailable: ${errorMessage(error)}`,
+          };
+        }
+      }
+      const result = await runProfileCommand(
+        { storagePath, ...(runtime ?? {}), ...(currentBinding ? { currentBinding } : {}) },
+        profileCommand,
+        dependencies,
+      );
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    } catch (error) {
+      console.error(`Profile/shared command failed: ${errorMessage(error)}`);
+      console.error(
+        "Protected: no model, runtime, profile, capability, or similarly named target was substituted.",
+      );
+      console.error("Recovery: fix the named exact target, then rerun the explicit command.");
       return 1;
     }
   }
@@ -661,6 +773,383 @@ async function runModelCommand(storagePath: string, command: ModelCommand): Prom
   }
 }
 
+type ProfileCommand =
+  | {
+      kind: "profile-create";
+      name: string;
+      modelId: string;
+      templateSha256: string;
+      contextSize: number;
+      slots: number;
+      gpuLayers: number;
+      threads: number;
+    }
+  | { kind: "profile-revise"; revisionId: string; contextSize: number }
+  | { kind: "profile-test"; revisionId: string }
+  | { kind: "profile-list" }
+  | {
+      kind: "shared-publish";
+      name: string;
+      revisionId: string;
+      contextTokens: number;
+      outputTokens: number;
+      concurrentRequests: number;
+    }
+  | { kind: "shared-transition"; transition: "pin" | "unpin" | "share" | "unshare"; id: string }
+  | { kind: "shared-replace"; id: string; revisionId: string }
+  | { kind: "shared-target"; id: string }
+  | { kind: "shared-list" };
+
+function isRecoveryListCommand(command: ProfileCommand): boolean {
+  return command.kind === "profile-list" || command.kind === "shared-list";
+}
+
+function isOfflineRecoveryTransition(command: ProfileCommand): boolean {
+  return (
+    command.kind === "shared-transition" &&
+    (command.transition === "unpin" || command.transition === "unshare")
+  );
+}
+
+function isRecoveryProfileCommand(command: ProfileCommand): boolean {
+  return isRecoveryListCommand(command) || isOfflineRecoveryTransition(command);
+}
+
+function parseProfileCommand(args: string[]): ProfileCommand | "invalid" | null {
+  if (args[0] !== "profile" && args[0] !== "shared") return null;
+  if (args[0] === "profile") {
+    if (args.length === 2 && args[1] === "list") return { kind: "profile-list" };
+    if (args.length === 3 && args[1] === "test") {
+      return { kind: "profile-test", revisionId: args[2] ?? "" };
+    }
+    if (args[1] === "revise" && args.length === 5 && args[3] === "--context") {
+      const contextSize = positiveInteger(args[4]);
+      return contextSize === null
+        ? "invalid"
+        : { kind: "profile-revise", revisionId: args[2] ?? "", contextSize };
+    }
+    if (args[1] !== "create") return "invalid";
+    const options = uniqueOptions(args, 2, [
+      "--name",
+      "--model",
+      "--template-sha256",
+      "--context",
+      "--slots",
+      "--gpu-layers",
+      "--threads",
+    ]);
+    if (!options) return "invalid";
+    const name = options.get("--name");
+    const modelId = options.get("--model");
+    const templateSha256 = options.get("--template-sha256");
+    const contextSize = positiveInteger(options.get("--context"));
+    const slots = positiveInteger(options.get("--slots"));
+    const gpuLayers = nonNegativeInteger(options.get("--gpu-layers"));
+    const threads = positiveInteger(options.get("--threads"));
+    if (
+      !name ||
+      !modelId ||
+      !templateSha256 ||
+      !/^[0-9a-f]{64}$/.test(templateSha256) ||
+      contextSize === null ||
+      slots === null ||
+      gpuLayers === null ||
+      threads === null
+    ) {
+      return "invalid";
+    }
+    return {
+      kind: "profile-create",
+      name,
+      modelId,
+      templateSha256,
+      contextSize,
+      slots,
+      gpuLayers,
+      threads,
+    };
+  }
+
+  if (args.length === 2 && args[1] === "list") return { kind: "shared-list" };
+  if (
+    args.length === 3 &&
+    (args[1] === "pin" || args[1] === "unpin" || args[1] === "share" || args[1] === "unshare")
+  ) {
+    return { kind: "shared-transition", transition: args[1], id: args[2] ?? "" };
+  }
+  if (args.length === 4 && args[1] === "replace") {
+    return { kind: "shared-replace", id: args[2] ?? "", revisionId: args[3] ?? "" };
+  }
+  if (args.length === 3 && args[1] === "target") {
+    return { kind: "shared-target", id: args[2] ?? "" };
+  }
+  if (args[1] !== "publish") return "invalid";
+  const options = uniqueOptions(args, 2, [
+    "--name",
+    "--revision",
+    "--context-limit",
+    "--output-limit",
+    "--concurrency",
+  ]);
+  if (!options) return "invalid";
+  const name = options.get("--name");
+  const revisionId = options.get("--revision");
+  const contextTokens = positiveInteger(options.get("--context-limit"));
+  const outputTokens = positiveInteger(options.get("--output-limit"));
+  const concurrentRequests = positiveInteger(options.get("--concurrency"));
+  if (
+    !name ||
+    !revisionId ||
+    contextTokens === null ||
+    outputTokens === null ||
+    concurrentRequests === null
+  ) {
+    return "invalid";
+  }
+  return {
+    kind: "shared-publish",
+    name,
+    revisionId,
+    contextTokens,
+    outputTokens,
+    concurrentRequests,
+  };
+}
+
+async function runProfileCommand(
+  context: {
+    storagePath: string;
+    runtime?: RunProfileRuntime;
+    binaryPath?: string;
+    currentBinding?: CurrentProfileBinding;
+  },
+  command: ProfileCommand,
+  dependencies: CliDependencies,
+): Promise<unknown> {
+  switch (command.kind) {
+    case "profile-create": {
+      const runtime = requiredProfileRuntime(context);
+      const model = (await inspectInstalledModels(context.storagePath)).find(
+        (item) => item.id === command.modelId,
+      );
+      if (!model?.available) {
+        throw new Error(
+          `Exact Installed Model is missing: ${command.modelId}. No similarly named model was selected.`,
+        );
+      }
+      const chatTemplate = model.templateHints.find(
+        (template) => sha256Text(template) === command.templateSha256,
+      );
+      if (!chatTemplate) {
+        throw new Error(
+          `Exact chat template SHA-256 is unavailable: ${command.templateSha256}. No template hint was substituted.`,
+        );
+      }
+      return await createRunProfile(context.storagePath, {
+        name: command.name,
+        modelId: model.id,
+        runtime,
+        chatTemplate,
+        controls: profileControls(command),
+        estimates: { projectedRamBytes: null, projectedGpuBytes: null },
+      });
+    }
+    case "profile-revise": {
+      const ledger = await inspectRunProfiles(context.storagePath, {
+        currentBinding: requiredProfileBinding(context),
+      });
+      const previous = ledger.revisions.find((item) => item.id === command.revisionId);
+      if (!previous) throw new Error(`Unknown exact Run Profile revision: ${command.revisionId}.`);
+      return await reviseRunProfile(context.storagePath, previous.id, {
+        controls: { ...previous.controls, contextSize: command.contextSize },
+      });
+    }
+    case "profile-test": {
+      const runtime = requiredProfileRuntime(context);
+      const binaryPath = requiredProfileBinary(context);
+      const [ledger, models] = await Promise.all([
+        inspectRunProfiles(context.storagePath, {
+          currentBinding: requiredProfileBinding(context),
+        }),
+        inspectInstalledModels(context.storagePath),
+      ]);
+      const revision = ledger.revisions.find((item) => item.id === command.revisionId);
+      if (!revision) throw new Error(`Unknown exact Run Profile revision: ${command.revisionId}.`);
+      if (
+        revision.runtime.binarySha256 !== runtime.binarySha256 ||
+        revision.runtime.build !== runtime.build ||
+        revision.runtime.commit !== runtime.commit
+      ) {
+        throw new Error(
+          "Exact Run Profile runtime is unavailable in this candidate; no runtime was substituted.",
+        );
+      }
+      const model = models.find((item) => item.id === revision.modelId);
+      if (!model?.available) {
+        throw new Error(
+          `Exact Installed Model is missing: ${revision.modelId}. No similarly named model was selected.`,
+        );
+      }
+      const observation = await (dependencies.runProfileTestWorker ?? runProfileWorker)({
+        binaryPath,
+        revision,
+        model,
+        port: await (dependencies.profilePort ?? findProfileWorkerPort)(),
+      });
+      const result = await testRunProfile(context.storagePath, revision.id, observation);
+      if (result.outcome === "Failed") {
+        throw new Error(result.failure ?? "Exact Profile Test failed without a recorded cause.");
+      }
+      return result;
+    }
+    case "profile-list":
+      return await inspectRunProfiles(context.storagePath, {
+        currentBinding: requiredProfileBinding(context),
+      });
+    case "shared-publish":
+      return await publishSharedModel(
+        context.storagePath,
+        {
+          name: command.name,
+          revisionId: command.revisionId,
+          limits: {
+            contextTokens: command.contextTokens,
+            outputTokens: command.outputTokens,
+            concurrentRequests: command.concurrentRequests,
+          },
+          capabilities: ["text"],
+        },
+        { currentBinding: requiredProfileBinding(context) },
+      );
+    case "shared-transition":
+      if (command.transition === "pin" || command.transition === "unpin") {
+        return await setSharedModelPin(
+          context.storagePath,
+          command.id,
+          command.transition === "pin",
+          command.transition === "pin" ? { currentBinding: requiredProfileBinding(context) } : {},
+        );
+      }
+      return await setSharedModelPublished(
+        context.storagePath,
+        command.id,
+        command.transition === "share",
+        command.transition === "share" ? { currentBinding: requiredProfileBinding(context) } : {},
+      );
+    case "shared-replace":
+      return await replaceSharedModel(context.storagePath, command.id, command.revisionId, {
+        currentBinding: requiredProfileBinding(context),
+      });
+    case "shared-target":
+      return await acceptSharedModelRequest(context.storagePath, command.id, {
+        currentBinding: requiredProfileBinding(context),
+      });
+    case "shared-list":
+      return (
+        await inspectRunProfiles(context.storagePath, {
+          currentBinding: requiredProfileBinding(context),
+        })
+      ).sharedModels;
+  }
+}
+
+function requiredProfileRuntime(context: { runtime?: RunProfileRuntime }): RunProfileRuntime {
+  if (!context.runtime) throw new Error("Exact current llama.cpp runtime is unavailable.");
+  return context.runtime;
+}
+
+function requiredProfileBinary(context: { binaryPath?: string }): string {
+  if (!context.binaryPath) throw new Error("Exact current llama.cpp binary is unavailable.");
+  return context.binaryPath;
+}
+
+function requiredProfileBinding(context: {
+  currentBinding?: CurrentProfileBinding;
+}): CurrentProfileBinding {
+  if (!context.currentBinding)
+    throw new Error("Exact current runtime and Host binding is unavailable.");
+  return context.currentBinding;
+}
+
+function profileControls(
+  command: Extract<ProfileCommand, { kind: "profile-create" }>,
+): RunProfileControls {
+  return {
+    contextSize: command.contextSize,
+    parallelSlots: command.slots,
+    kvUnified: true,
+    batchSize: 512,
+    microBatchSize: 128,
+    gpuLayers: command.gpuLayers,
+    threads: command.threads,
+    threadsBatch: command.threads,
+    flashAttention: "on",
+    kvOffload: true,
+    cacheTypeK: "f16",
+    cacheTypeV: "f16",
+    loadMode: "mmap",
+    splitMode: "none",
+    mainGpu: 0,
+    continuousBatching: true,
+    warmup: true,
+  };
+}
+
+function uniqueOptions(
+  args: string[],
+  start: number,
+  allowed: string[],
+): Map<string, string> | null {
+  if ((args.length - start) % 2 !== 0) return null;
+  const result = new Map<string, string>();
+  for (let index = start; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (!name || value === undefined || !allowed.includes(name) || result.has(name)) return null;
+    result.set(name, value);
+  }
+  return result;
+}
+
+function positiveInteger(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function nonNegativeInteger(value: string | undefined): number | null {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function configuredProfileRuntime(options: {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+}): Promise<{ runtime: RunProfileRuntime; binaryPath: string }> {
+  const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+      ...(options.inspectReleaseAsset ? { inspectAsset: options.inspectReleaseAsset } : {}),
+    },
+  );
+  const bundle = runBundleFromCandidate(options.candidateRecordPath, candidate);
+  return {
+    runtime: {
+      build: bundle.llama.build,
+      commit: bundle.llama.commit,
+      binarySha256: bundle.llama.binary.sha256,
+    },
+    binaryPath: bundle.llama.binaryPath,
+  };
+}
+
 async function configuredModelStorage(options: {
   buildCommit: string;
   candidateRecordPath: string;
@@ -669,6 +1158,30 @@ async function configuredModelStorage(options: {
   inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
 }): Promise<string> {
   const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+      ...(options.inspectReleaseAsset ? { inspectAsset: options.inspectReleaseAsset } : {}),
+    },
+  );
+  const firstRun = await readFirstRunState(options.firstRunStatePath, candidate);
+  if (!firstRun?.choices.modelStorage) {
+    throw new Error(
+      "Guided First Run has not confirmed Model Storage for this exact candidate. Run `lh first-run`.",
+    );
+  }
+  return firstRun.choices.modelStorage.path;
+}
+
+async function configuredModelStorageForRecovery(options: {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  firstRunStatePath: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+}): Promise<string> {
+  const candidate = await verifyReleaseCandidateForRecovery(
     options.candidateRecordPath,
     options.executablePath,
     {

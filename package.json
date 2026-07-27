@@ -21,7 +21,8 @@
     "candidate:assemble": "bun run scripts/assemble-candidate.ts",
     "candidate:smoke": "bun run scripts/run-candidate-smoke.ts",
     "candidate:lifecycle": "bun run scripts/run-lifecycle-smoke.ts",
-    "candidate:model": "bun run scripts/run-model-acquisition-smoke.ts"
+    "candidate:model": "bun run scripts/run-model-acquisition-smoke.ts",
+    "candidate:profile": "bun run scripts/run-profile-smoke.ts"
   },
   "dependencies": {
     "@opentui/core": "0.4.5",
