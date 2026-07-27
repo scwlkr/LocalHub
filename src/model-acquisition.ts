@@ -563,6 +563,18 @@ export async function discardModelAcquisition(
 export async function inspectInstalledModels(storagePathValue: string): Promise<InstalledModel[]> {
   const storagePath = resolve(storagePathValue);
   const state = await readModelStateForInspection(storagePath);
+  return await inspectInstalledModelsFromState(state);
+}
+
+export async function inspectInstalledModelsUnderCatalogLock(
+  storagePathValue: string,
+): Promise<InstalledModel[]> {
+  const storagePath = resolve(storagePathValue);
+  const state = await readReconciledModelState(storagePath);
+  return await inspectInstalledModelsFromState(state);
+}
+
+async function inspectInstalledModelsFromState(state: ModelState): Promise<InstalledModel[]> {
   return await Promise.all(
     state.installedModels.map(async (model) => ({
       ...model,

@@ -3,6 +3,7 @@ import type { InstalledModel } from "../src/model-acquisition.ts";
 import {
   buildProfileWorkerCommand,
   exactSlotsIdle,
+  readJsonWithDeadline,
   runProfileWorker,
   type ProfileWorkerProcess,
 } from "../src/profile-worker.ts";
@@ -356,6 +357,30 @@ test("missing effective-setting proof makes the exact Profile Test fail", async 
   expect(result.load.passed).toBeFalse();
   expect(result.effective.placement).toBe("unobserved");
   expect(result.failure).toContain("did not prove the exact effective placement and load settings");
+});
+
+test("mandatory JSON observation keeps its deadline through a stalled response body", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("{"));
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    },
+  });
+  const startedAt = Date.now();
+  try {
+    await expect(readJsonWithDeadline(`${server.url}stalled`, {}, 50)).rejects.toThrow();
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  } finally {
+    server.stop(true);
+  }
 });
 
 function observedProps(revision: RunProfileRevision) {

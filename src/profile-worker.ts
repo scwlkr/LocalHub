@@ -371,9 +371,9 @@ function createProfileWorkerTransport(
       throw new Error(`Exact Profile Test load/health deadline expired (${last}).`);
     },
     async props(origin) {
-      const response = await finiteFetch(`${origin}/props`, {}, 2_000);
+      const { response, value } = await readJsonWithDeadline(`${origin}/props`, {}, 2_000);
       if (!response.ok) throw new Error(`llama.cpp props returned HTTP ${response.status}.`);
-      const value = (await response.json()) as Record<string, unknown>;
+      if (!isRecord(value)) throw new Error("llama.cpp props response was malformed.");
       const settings = isRecord(value.default_generation_settings)
         ? value.default_generation_settings
         : {};
@@ -401,9 +401,8 @@ function createProfileWorkerTransport(
       };
     },
     async slots(origin) {
-      const response = await finiteFetch(`${origin}/slots`, {}, 2_000);
+      const { response, value } = await readJsonWithDeadline(`${origin}/slots`, {}, 2_000);
       if (!response.ok) throw new Error(`llama.cpp slots returned HTTP ${response.status}.`);
-      const value = await response.json();
       if (!Array.isArray(value)) throw new Error("llama.cpp slots response was malformed.");
       return value.map((slot, index) => {
         if (!isRecord(slot)) throw new Error("llama.cpp slot entry was malformed.");
@@ -418,17 +417,25 @@ function createProfileWorkerTransport(
       return await streamedTextProof(origin, modelAlias, now);
     },
     async metrics(origin) {
-      const response = await finiteFetch(`${origin}/metrics`, {}, 2_000);
-      const body = await response.text();
+      const { response, value: body } = await readTextWithDeadline(`${origin}/metrics`, {}, 2_000);
       if (!response.ok || body.trim().length === 0) {
         throw new Error(`llama.cpp metrics proof returned HTTP ${response.status}.`);
       }
     },
     async authority(origin) {
-      const tools = await finiteFetch(`${origin}/tools`, {}, 2_000);
+      const { response: tools, value: toolsBody } = await readTextWithDeadline(
+        `${origin}/tools`,
+        {},
+        2_000,
+      );
       let toolDisabled = false;
       if (tools.status === 403) {
-        const value = (await tools.json().catch(() => null)) as unknown;
+        let value: unknown = null;
+        try {
+          value = JSON.parse(toolsBody);
+        } catch {
+          value = null;
+        }
         toolDisabled =
           isRecord(value) && isRecord(value.error) && value.error.type === "feature_disabled";
       }
@@ -462,9 +469,12 @@ function createProfileWorkerTransport(
       await reader.cancel().catch(() => undefined);
       const deadline = cancelledAt + deadlineMs;
       while (now() < deadline) {
-        const slotsResponse = await finiteFetch(`${origin}/slots`, {}, 1_000);
+        const { response: slotsResponse, value: slots } = await readJsonWithDeadline(
+          `${origin}/slots`,
+          {},
+          1_000,
+        );
         if (slotsResponse.ok) {
-          const slots = await slotsResponse.json();
           if (exactSlotsIdle(slots, expectedSlotIds)) {
             return { passed: true, slotReleasedMs: Math.max(0, now() - cancelledAt) };
           }
@@ -655,13 +665,51 @@ async function sha256File(path: string): Promise<string> {
 }
 
 async function finiteFetch(url: string, init: RequestInit, deadlineMs: number): Promise<Response> {
+  return (
+    await consumeWithDeadline(url, init, deadlineMs, async (response) => ({
+      response,
+      value: null,
+    }))
+  ).response;
+}
+
+export async function readJsonWithDeadline(
+  url: string,
+  init: RequestInit,
+  deadlineMs: number,
+): Promise<{ response: Response; value: unknown }> {
+  return await consumeWithDeadline(url, init, deadlineMs, async (response) => ({
+    response,
+    value: (await response.json()) as unknown,
+  }));
+}
+
+async function readTextWithDeadline(
+  url: string,
+  init: RequestInit,
+  deadlineMs: number,
+): Promise<{ response: Response; value: string }> {
+  return await consumeWithDeadline(url, init, deadlineMs, async (response) => ({
+    response,
+    value: await response.text(),
+  }));
+}
+
+async function consumeWithDeadline<T>(
+  url: string,
+  init: RequestInit,
+  deadlineMs: number,
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), deadlineMs);
   const provided = init.signal;
   const abort = (): void => controller.abort();
+  if (provided?.aborted) controller.abort();
   provided?.addEventListener("abort", abort, { once: true });
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    return await consume(response);
   } finally {
     clearTimeout(timer);
     provided?.removeEventListener("abort", abort);

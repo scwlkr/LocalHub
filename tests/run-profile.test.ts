@@ -482,6 +482,101 @@ test("profile catalog rejects symlinks and malformed records and reclaims a dead
   );
 });
 
+test("tampered Shared Model authority and limits fail closed at read and admission", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const revision = await passingRevision(
+    storagePath,
+    "Authority profile",
+    model,
+    pinnedRuntime(),
+    4096,
+  );
+  const shared = await publishSharedModel(
+    storagePath,
+    {
+      name: "Authority shared",
+      revisionId: revision.id,
+      limits: { contextTokens: 2048, outputTokens: 256, concurrentRequests: 1 },
+      capabilities: ["text"],
+    },
+    catalogDependencies(model),
+  );
+  expect(
+    (await acceptSharedModelRequest(storagePath, shared.id, catalogDependencies(model)))
+      .sharedModelId,
+  ).toBe(shared.id);
+
+  const statePath = join(storagePath, ".localhub-catalog", "run-profiles.json");
+  const baseline = await readFile(statePath, "utf8");
+  const tamperings: Array<(record: Record<string, unknown>) => void> = [
+    (record) => {
+      record.profileResultId = "result-missing";
+    },
+    (record) => {
+      record.capabilities = ["text", "browserTools"];
+    },
+    (record) => {
+      record.limits = { contextTokens: 8192, outputTokens: 256, concurrentRequests: 1 };
+    },
+    (record) => {
+      record.limits = { contextTokens: 2048, outputTokens: 8192, concurrentRequests: 1 };
+    },
+    (record) => {
+      record.limits = { contextTokens: 2048, outputTokens: 256, concurrentRequests: 3 };
+    },
+  ];
+  for (const tamper of tamperings) {
+    const state = JSON.parse(baseline) as Record<string, unknown>;
+    const record = (state.sharedModels as Array<Record<string, unknown>>)[0];
+    if (!record) throw new Error("Missing Shared Model fixture.");
+    tamper(record);
+    await writeFile(statePath, `${JSON.stringify(state)}\n`);
+    await expect(inspectRunProfiles(storagePath, catalogDependencies(model))).rejects.toThrow(
+      "incomplete or malformed",
+    );
+    await expect(
+      acceptSharedModelRequest(storagePath, shared.id, catalogDependencies(model)),
+    ).rejects.toThrow("incomplete or malformed");
+  }
+});
+
+test("displayed launch command rejects catalog tampering and follows a verified path move", async () => {
+  const storagePath = await modelStorage();
+  const model = installedModel();
+  const revision = await passingRevision(
+    storagePath,
+    "Derived command",
+    model,
+    pinnedRuntime(),
+    4096,
+  );
+  expect(revision.renderedLaunchCommand).toContain("/models/family.gguf");
+  const statePath = join(storagePath, ".localhub-catalog", "run-profiles.json");
+  const baseline = await readFile(statePath, "utf8");
+  const tampered = JSON.parse(baseline) as Record<string, unknown>;
+  const storedRevision = (tampered.revisions as Array<Record<string, unknown>>)[0];
+  if (!storedRevision) throw new Error("Missing Run Profile fixture.");
+  storedRevision.renderedLaunchCommand = `llama-server --model /substitute.gguf --alias ${revision.id}`;
+  await writeFile(statePath, `${JSON.stringify(tampered)}\n`);
+  await expect(inspectRunProfiles(storagePath, catalogDependencies(model))).rejects.toThrow(
+    "incomplete or malformed",
+  );
+
+  await writeFile(statePath, baseline);
+  const movedModel = {
+    ...model,
+    files: model.files.map((file) => ({
+      ...file,
+      path: `/verified-move/${file.fileName}`,
+    })),
+  };
+  const ledger = await inspectRunProfiles(storagePath, catalogDependencies(movedModel));
+  expect(ledger.revisions[0]).toMatchObject({ id: revision.id, evidenceState: "Passed" });
+  expect(ledger.revisions[0]?.renderedLaunchCommand).toContain("/verified-move/family.gguf");
+  expect(ledger.revisions[0]?.renderedLaunchCommand).not.toContain("/models/family.gguf");
+});
+
 test("concurrent profile mutations preserve both exact revisions", async () => {
   const storagePath = await modelStorage();
   const model = installedModel();

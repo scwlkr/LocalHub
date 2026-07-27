@@ -14,6 +14,7 @@ import {
   prepareLocalModel,
   renameInstalledModel,
 } from "../src/model-acquisition.ts";
+import { createRunProfile } from "../src/run-profile.ts";
 
 const roots: string[] = [];
 
@@ -920,7 +921,12 @@ test("restart reconciles an exact promotion after the importing process dies bef
   const markerPath = join(root, "promoted.marker");
   await writeFile(
     sourcePath,
-    gguf({ architecture: "qwen2", name: "Restart Promotion", contextLength: 2048 }),
+    gguf({
+      architecture: "qwen2",
+      name: "Restart Promotion",
+      contextLength: 2048,
+      chatTemplate: "{{ messages }}",
+    }),
   );
   await prepareModelStorage(storagePath);
   const acquisition = await prepareLocalModel(
@@ -953,6 +959,48 @@ test("restart reconciles an exact promotion after the importing process dies bef
   }
   worker.kill("SIGKILL");
   await worker.exited;
+
+  const journal = (await Bun.file(
+    join(storagePath, ".localhub-catalog", "promotion.json"),
+  ).json()) as { installed: { id: string } };
+  const revision = await createRunProfile(
+    storagePath,
+    {
+      name: "Reconciled exact model",
+      modelId: journal.installed.id,
+      runtime: {
+        build: "b10107",
+        commit: "c0bc8591e8815c63cb01dd3f051a8b0df02501c9",
+        binarySha256: "e".repeat(64),
+      },
+      chatTemplate: "{{ messages }}",
+      controls: {
+        contextSize: 2048,
+        parallelSlots: 1,
+        kvUnified: true,
+        batchSize: 512,
+        microBatchSize: 128,
+        gpuLayers: 99,
+        threads: 8,
+        threadsBatch: 8,
+        flashAttention: "on",
+        kvOffload: true,
+        cacheTypeK: "f16",
+        cacheTypeV: "f16",
+        loadMode: "mmap",
+        splitMode: "none",
+        mainGpu: 0,
+        continuousBatching: true,
+        warmup: true,
+      },
+      estimates: { projectedRamBytes: null, projectedGpuBytes: null },
+    },
+    { lockDeadlineMs: 250 },
+  );
+  expect(revision.modelId).toBe(journal.installed.id);
+  expect(
+    await Bun.file(join(storagePath, ".localhub-catalog", "promotion.json")).exists(),
+  ).toBeFalse();
 
   expect(await inspectInstalledModels(storagePath)).toMatchObject([
     { displayName: "Restart Promotion", available: true },

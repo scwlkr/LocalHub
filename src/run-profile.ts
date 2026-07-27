@@ -5,6 +5,7 @@ import {
   assertManagedModelStorage,
   type InstalledModel,
   inspectInstalledModels,
+  inspectInstalledModelsUnderCatalogLock,
   type ModelMutationDependencies,
   withModelCatalogMutationLock,
 } from "./model-acquisition.ts";
@@ -57,6 +58,8 @@ export interface RunProfileRevision {
   renderedLaunchCommand: string;
   createdAt: string;
 }
+
+type StoredRunProfileRevision = Omit<RunProfileRevision, "renderedLaunchCommand">;
 
 export type OptionalCapability = "imageInput" | "browserTools" | "toolRunnerFunctions";
 export type CapabilityState = "Passed" | "Failed" | "Unavailable";
@@ -141,6 +144,7 @@ export interface SharedModel {
   id: string;
   name: string;
   revisionId: string;
+  profileResultId: string;
   limits: SharedModelLimits;
   capabilities: Array<"text" | OptionalCapability>;
   pinned: boolean;
@@ -170,7 +174,7 @@ export interface AcceptedSharedModelTarget {
 
 interface RunProfileState {
   schema: typeof RUN_PROFILE_STATE_SCHEMA;
-  revisions: RunProfileRevision[];
+  revisions: StoredRunProfileRevision[];
   results: ProfileResult[];
   sharedModels: SharedModel[];
 }
@@ -199,7 +203,13 @@ export async function createRunProfile(
   return await mutateState(
     storagePath,
     async (state) => {
-      const model = await exactAvailableModel(storagePath, input.modelId, dependencies);
+      const model = await exactAvailableModel(
+        storagePath,
+        input.modelId,
+        dependencies,
+        undefined,
+        true,
+      );
       const name = nonEmpty(input.name, "Run Profile name");
       assertRuntime(input.runtime);
       const chatTemplate = nonEmpty(input.chatTemplate, "Chat template");
@@ -221,7 +231,7 @@ export async function createRunProfile(
         createdAt: now(dependencies),
       });
       state.revisions.push(revision);
-      return revision;
+      return revisionWithCommand(revision, model);
     },
     dependencies,
   );
@@ -251,6 +261,8 @@ export async function reviseRunProfile(
         storagePath,
         changes.modelId ?? previous.modelId,
         dependencies,
+        undefined,
+        true,
       );
       const candidate = makeRevision({
         profileId: previous.profileId,
@@ -267,7 +279,7 @@ export async function reviseRunProfile(
         throw new Error("Run Profile revision did not change any bound input.");
       }
       state.revisions.push(candidate);
-      return candidate;
+      return revisionWithCommand(candidate, model);
     },
     dependencies,
   );
@@ -283,7 +295,13 @@ export async function testRunProfile(
     storagePath,
     async (state) => {
       const revision = exactRevision(state, revisionId);
-      await exactAvailableModel(storagePath, revision.modelId, dependencies, revision.modelFiles);
+      await exactAvailableModel(
+        storagePath,
+        revision.modelId,
+        dependencies,
+        revision.modelFiles,
+        true,
+      );
       const mismatches = observationMismatches(revision, observation);
       const mandatoryPassed =
         observation.load.passed &&
@@ -355,7 +373,7 @@ export async function inspectRunProfiles(
   const state = await readState(storagePath);
   const models = await (dependencies.inspectModels ?? inspectInstalledModels)(storagePath);
   const revisions = state.revisions.map((revision) => ({
-    ...revision,
+    ...revisionWithCurrentCommand(revision, models),
     evidenceState: evidenceState(state, revision, models, currentBinding),
   }));
   const results = state.results.map((result) => ({
@@ -402,6 +420,7 @@ export async function publishSharedModel(
         state,
         input.revisionId,
         dependencies,
+        true,
       );
       const name = nonEmpty(input.name, "Shared Model name");
       if (
@@ -422,6 +441,7 @@ export async function publishSharedModel(
         ),
         name,
         revisionId: revision.id,
+        profileResultId: result.id,
         limits: structuredClone(input.limits),
         capabilities: [...input.capabilities],
         pinned: false,
@@ -447,7 +467,7 @@ export async function setSharedModelPin(
     async (state) => {
       const shared = exactSharedModel(state, sharedModelId);
       if (pinned) {
-        await currentlyPassingRevision(storagePath, state, shared.revisionId, dependencies);
+        await currentlyPassingRevision(storagePath, state, shared.revisionId, dependencies, true);
       }
       shared.pinned = pinned;
       shared.updatedAt = now(dependencies);
@@ -468,7 +488,14 @@ export async function setSharedModelPublished(
     async (state) => {
       const shared = exactSharedModel(state, sharedModelId);
       if (published) {
-        await currentlyPassingRevision(storagePath, state, shared.revisionId, dependencies);
+        const revision = await currentlyPassingRevision(
+          storagePath,
+          state,
+          shared.revisionId,
+          dependencies,
+          true,
+        );
+        shared.profileResultId = passingResult(state, revision.id).id;
       }
       shared.published = published;
       shared.updatedAt = now(dependencies);
@@ -488,11 +515,18 @@ export async function replaceSharedModel(
     storagePath,
     async (state) => {
       const shared = exactSharedModel(state, sharedModelId);
-      const revision = await currentlyPassingRevision(storagePath, state, revisionId, dependencies);
+      const revision = await currentlyPassingRevision(
+        storagePath,
+        state,
+        revisionId,
+        dependencies,
+        true,
+      );
       const result = passingResult(state, revision.id);
       assertLimits(shared.limits, result.effective.contextPerSlot, result.effective.slotCount);
       assertExposedCapabilities(shared.capabilities, result);
       shared.revisionId = revision.id;
+      shared.profileResultId = result.id;
       shared.updatedAt = now(dependencies);
       return structuredClone(shared);
     },
@@ -508,6 +542,7 @@ export async function acceptSharedModelRequest(
   await assertManagedModelStorage(resolve(storagePath));
   const state = await readState(storagePath);
   const shared = exactSharedModel(state, sharedModelId);
+  assertSharedModelAuthority(state, shared);
   if (!shared.published) {
     throw new Error(`Shared Model ${shared.id} is unshared and cannot accept new work.`);
   }
@@ -535,7 +570,7 @@ export type EvidenceState = "Untested" | "Passed" | "Failed" | "Stale" | "Missin
 
 function evidenceState(
   state: RunProfileState,
-  revision: RunProfileRevision,
+  revision: StoredRunProfileRevision,
   models: InstalledModel[],
   currentBinding: CurrentProfileBinding,
   selectedResult?: ProfileResult,
@@ -556,7 +591,8 @@ async function currentlyPassingRevision(
   state: RunProfileState,
   revisionId: string,
   dependencies: RunProfileDependencies,
-): Promise<RunProfileRevision> {
+  catalogLockHeld = false,
+): Promise<StoredRunProfileRevision> {
   const revision = exactRevision(state, revisionId);
   if (latestRevision(state, revision.profileId).id !== revision.id) {
     throw new Error(`Run Profile revision ${revision.id} is stale and cannot accept new work.`);
@@ -572,7 +608,13 @@ async function currentlyPassingRevision(
       `Run Profile revision ${revision.id} requires a different exact runtime and is stale in this candidate.`,
     );
   }
-  await exactAvailableModel(storagePath, revision.modelId, dependencies, revision.modelFiles);
+  await exactAvailableModel(
+    storagePath,
+    revision.modelId,
+    dependencies,
+    revision.modelFiles,
+    catalogLockHeld,
+  );
   const result = latestResult(state, revision.id);
   if (result?.outcome !== "Passed") {
     throw new Error(
@@ -595,13 +637,27 @@ function passingResult(state: RunProfileState, revisionId: string): ProfileResul
   return result;
 }
 
+function assertSharedModelAuthority(state: RunProfileState, shared: SharedModel): ProfileResult {
+  const result = state.results.find((item) => item.id === shared.profileResultId);
+  if (result?.outcome !== "Passed" || result.revisionId !== shared.revisionId) {
+    throw new Error(`Shared Model ${shared.id} is not bound to its exact passing Profile Result.`);
+  }
+  assertLimits(shared.limits, result.effective.contextPerSlot, result.effective.slotCount);
+  assertExposedCapabilities(shared.capabilities, result);
+  return result;
+}
+
 async function exactAvailableModel(
   storagePath: string,
   modelId: string,
   dependencies: RunProfileDependencies,
   expectedFiles?: RunProfileRevision["modelFiles"],
+  catalogLockHeld = false,
 ): Promise<InstalledModel> {
-  const models = await (dependencies.inspectModels ?? inspectInstalledModels)(storagePath);
+  const inspectModels =
+    dependencies.inspectModels ??
+    (catalogLockHeld ? inspectInstalledModelsUnderCatalogLock : inspectInstalledModels);
+  const models = await inspectModels(storagePath);
   const model = models.find((item) => item.id === modelId);
   if (!model?.available) {
     throw new Error(
@@ -626,7 +682,7 @@ function makeRevision(input: {
   controls: RunProfileControls;
   estimates: RunProfileEstimates;
   createdAt: string;
-}): RunProfileRevision {
+}): StoredRunProfileRevision {
   assertRuntime(input.runtime);
   assertControls(input.controls);
   assertEstimates(input.estimates);
@@ -648,9 +704,40 @@ function makeRevision(input: {
     ...bound,
     chatTemplate: input.chatTemplate,
     estimates: structuredClone(input.estimates),
-    renderedLaunchCommand: renderLaunch(id, input.model, input.chatTemplate, input.controls),
     createdAt: input.createdAt,
   };
+}
+
+function revisionWithCommand(
+  revision: StoredRunProfileRevision,
+  model: InstalledModel,
+): RunProfileRevision {
+  return {
+    ...revision,
+    renderedLaunchCommand: renderLaunch(
+      revision.id,
+      model,
+      revision.chatTemplate,
+      revision.controls,
+    ),
+  };
+}
+
+function revisionWithCurrentCommand(
+  revision: StoredRunProfileRevision,
+  models: InstalledModel[],
+): RunProfileRevision {
+  const model = models.find(
+    (item) =>
+      item.id === revision.modelId && item.available && sameFiles(revision.modelFiles, item.files),
+  );
+  if (!model) {
+    return {
+      ...revision,
+      renderedLaunchCommand: `Unavailable: exact Installed Model ${revision.modelId} is not verified.`,
+    };
+  }
+  return revisionWithCommand(revision, model);
 }
 
 function renderLaunch(
@@ -745,7 +832,7 @@ export function profileLaunchCommand(input: {
 }
 
 function observationMismatches(
-  revision: RunProfileRevision,
+  revision: StoredRunProfileRevision,
   observation: ProfileTestObservation,
 ): string[] {
   const expected = {
@@ -775,7 +862,7 @@ function observationMismatches(
     : ["Exact Profile Test observation did not match the selected revision."];
 }
 
-function sameBoundInputs(left: RunProfileRevision, right: RunProfileRevision): boolean {
+function sameBoundInputs(left: StoredRunProfileRevision, right: StoredRunProfileRevision): boolean {
   return (
     JSON.stringify({
       name: left.name,
@@ -843,7 +930,7 @@ function sharedUnavailability(
   return `Exact Run Profile evidence is ${evidenceState}.`;
 }
 
-function latestRevision(state: RunProfileState, profileId: string): RunProfileRevision {
+function latestRevision(state: RunProfileState, profileId: string): StoredRunProfileRevision {
   const revisions = state.revisions.filter((item) => item.profileId === profileId);
   const latest = revisions.sort((left, right) => right.revision - left.revision)[0];
   if (!latest) throw new Error(`Unknown Run Profile: ${profileId}`);
@@ -854,7 +941,7 @@ function latestResult(state: RunProfileState, revisionId: string): ProfileResult
   return state.results.filter((item) => item.revisionId === revisionId).at(-1);
 }
 
-function exactRevision(state: RunProfileState, revisionId: string): RunProfileRevision {
+function exactRevision(state: RunProfileState, revisionId: string): StoredRunProfileRevision {
   const revision = state.revisions.find((item) => item.id === revisionId);
   if (!revision) {
     throw new Error(
@@ -1026,7 +1113,7 @@ function validRunProfileState(value: unknown): value is RunProfileState {
     return false;
   }
 
-  const revisions = value.revisions as RunProfileRevision[];
+  const revisions = value.revisions as StoredRunProfileRevision[];
   const results = value.results as ProfileResult[];
   const sharedModels = value.sharedModels as SharedModel[];
   const revisionIds = new Set(revisions.map((item) => item.id));
@@ -1055,7 +1142,6 @@ function validRunProfileState(value: unknown): value is RunProfileState {
       controls: revision.controls,
     };
     if (revision.id !== sha256(JSON.stringify(bound))) return false;
-    if (!revision.renderedLaunchCommand.includes(`--alias ${revision.id}`)) return false;
     const sequence = revisionsByProfile.get(revision.profileId) ?? [];
     sequence.push(revision.revision);
     revisionsByProfile.set(revision.profileId, sequence);
@@ -1072,12 +1158,19 @@ function validRunProfileState(value: unknown): value is RunProfileState {
       return false;
     }
   }
+  try {
+    for (const shared of sharedModels) {
+      assertSharedModelAuthority(value as unknown as RunProfileState, shared);
+    }
+  } catch {
+    return false;
+  }
   return true;
 }
 
 function validPassingResultForRevision(
   result: ProfileResult,
-  revision: RunProfileRevision,
+  revision: StoredRunProfileRevision,
 ): boolean {
   return (
     result.failure === null &&
@@ -1105,9 +1198,23 @@ function validPassingResultForRevision(
   );
 }
 
-function validRevision(value: unknown): value is RunProfileRevision {
+function validRevision(value: unknown): value is StoredRunProfileRevision {
   if (!isRecord(value)) return false;
   return (
+    hasExactKeys(value, [
+      "id",
+      "profileId",
+      "revision",
+      "name",
+      "modelId",
+      "modelFiles",
+      "runtime",
+      "chatTemplate",
+      "chatTemplateSha256",
+      "controls",
+      "estimates",
+      "createdAt",
+    ]) &&
     sha256String(value.id) &&
     safeId(value.profileId) &&
     positiveInteger(value.revision) &&
@@ -1120,7 +1227,6 @@ function validRevision(value: unknown): value is RunProfileRevision {
     value.chatTemplateSha256 === sha256(value.chatTemplate) &&
     validControls(value.controls) &&
     validEstimates(value.estimates) &&
-    nonBlankString(value.renderedLaunchCommand) &&
     validTimestamp(value.createdAt)
   );
 }
@@ -1154,6 +1260,7 @@ function validSharedModel(value: unknown): value is SharedModel {
     safeId(value.id) &&
     nonBlankString(value.name) &&
     sha256String(value.revisionId) &&
+    safeId(value.profileResultId) &&
     validLimits(value.limits) &&
     Array.isArray(value.capabilities) &&
     value.capabilities.length > 0 &&
@@ -1344,6 +1451,11 @@ function validTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;
   const timestamp = Date.parse(value);
   return !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return JSON.stringify(actual) === JSON.stringify([...expected].sort());
 }
 
 async function writeState(storagePath: string, state: RunProfileState): Promise<void> {
