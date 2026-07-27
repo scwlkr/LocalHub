@@ -832,7 +832,9 @@ async function reclaimDeadMutationLock(
   try {
     owner = JSON.parse(await readFile(join(lockPath, "owner.json"), "utf8"));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return !(await pathExists(lockPath));
+    }
     throw new Error(`Model catalog mutation lock owner is unreadable: ${errorMessage(error)}`);
   }
   if (
