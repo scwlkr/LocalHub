@@ -10,7 +10,6 @@ import {
   realpath,
   rename,
   rm,
-  stat,
   statfs,
   writeFile,
 } from "node:fs/promises";
@@ -113,7 +112,7 @@ interface GgufInspection {
   tensorTypes: Record<string, number>;
   trainingContext: number | null;
   templateHints: string[];
-  projectorType: string | null;
+  projectorTypes: string[];
   split: { index: number; count: number; tensorCount: number } | null;
 }
 
@@ -160,6 +159,11 @@ const PINNED_LLAMA_ARCHITECTURES = new Set(
     " ",
   ),
 );
+const PINNED_PROJECTOR_TYPES = new Set(
+  "mlp ldp ldpv2 resampler adapter qwen2vl_merger qwen2.5vl_merger qwen3vl_merger step3vl gemma3 gemma3nv gemma3na gemma4v gemma4a gemma4uv gemma4ua phi4 idefics3 pixtral ultravox internvl llama4 qwen2a qwen3a glma qwen2.5o voxtral meralion musicflamingo lfm2 kimivl paddleocr lightonocr cogvlm janus_pro dots_ocr deepseekocr deepseekocr2 lfm2a glm4v youtuvl yasa2 kimik25 nemotron_v2_vl exaone4_5 hunyuanvl minicpmv4_6 granite_speech mimovl granite4_vision".split(
+    " ",
+  ),
+);
 
 export async function prepareLocalModel(
   options: PrepareLocalModelOptions,
@@ -176,6 +180,7 @@ export async function prepareLocalModel(
 
   const files: PlannedModelFile[] = [];
   const selectedPaths = new Set<string>();
+  const selectedFileNames = new Set<string>();
   const canonicalStoragePath = await realpath(storagePath);
   for (const selected of options.files) {
     const sourcePath = resolve(selected.path);
@@ -185,6 +190,12 @@ export async function prepareLocalModel(
     if (!sourcePath.toLowerCase().endsWith(".gguf")) {
       throw new Error(`Selected local file is not GGUF: ${sourcePath}`);
     }
+    const fileName = basename(sourcePath);
+    const foldedFileName = fileName.toLocaleLowerCase("en-US");
+    if (selectedFileNames.has(foldedFileName)) {
+      throw new Error(`Selected local filename is repeated: ${fileName}`);
+    }
+    selectedFileNames.add(foldedFileName);
     const source = await readableRegularFile(sourcePath);
     const canonicalSourcePath = await realpath(sourcePath);
     const insideStorage = pathInside(canonicalStoragePath, canonicalSourcePath);
@@ -202,7 +213,7 @@ export async function prepareLocalModel(
     }
     files.push({
       sourcePath,
-      fileName: basename(sourcePath),
+      fileName,
       role: selected.role,
       transfer: insideStorage ? "adopt" : "copy",
       expectedSize: source.size,
@@ -318,6 +329,7 @@ export async function importLocalModel(
         sha256File(file.path),
         inspectGguf(file.path),
       ]);
+      await assertUnchangedSource(file.selected);
       if (file.selected.publishedSha256 && sha256 !== file.selected.publishedSha256) {
         throw new Error(
           `Published SHA-256 mismatch for ${file.selected.fileName}: expected ${file.selected.publishedSha256}, observed ${sha256}.`,
@@ -342,10 +354,11 @@ export async function importLocalModel(
     for (const companion of companionFiles) {
       if (
         companion.inspection.architecture !== "clip" ||
-        companion.inspection.projectorType === null
+        companion.inspection.projectorTypes.length === 0 ||
+        companion.inspection.projectorTypes.some((type) => !PINNED_PROJECTOR_TYPES.has(type))
       ) {
         throw new Error(
-          `Wrong companion GGUF ${companion.fileName}: expected clip architecture with an embedded projector type.`,
+          `Wrong companion GGUF ${companion.fileName}: expected clip architecture with embedded pinned projector identity.`,
         );
       }
     }
@@ -372,11 +385,22 @@ export async function importLocalModel(
       await writeModelState(storagePath, state);
       return duplicate;
     }
+    const foldedName = acquisition.displayName.toLocaleLowerCase("en-US");
+    if (
+      state.installedModels.some(
+        (model) => model.displayName.toLocaleLowerCase("en-US") === foldedName,
+      )
+    ) {
+      throw new Error(`Installed Model display name is already in use: ${acquisition.displayName}`);
+    }
 
     const finalDirectory = join(storagePath, ".localhub-models", id);
-    if (orderedFiles.some((file) => file.managed)) {
+    const hasManagedFiles = orderedFiles.some((file) => file.managed);
+    if (hasManagedFiles) {
       await (dependencies.renamePath ?? rename)(stagingPath, finalDirectory);
       promotedDirectory = finalDirectory;
+    } else {
+      await rm(stagingPath, { recursive: true, force: true });
     }
     const installedFiles = orderedFiles.map<InstalledModelFile>((file) => ({
       fileName: file.fileName,
@@ -566,8 +590,9 @@ async function modelStorageAvailableBytes(storagePath: string): Promise<number> 
 async function installedFilesPresent(files: InstalledModelFile[]): Promise<boolean> {
   for (const file of files) {
     try {
-      const entry = await stat(file.path);
-      if (!entry.isFile() || entry.size !== file.size) return false;
+      const entry = await lstat(file.path);
+      if (entry.isSymbolicLink() || !entry.isFile() || entry.size !== file.size) return false;
+      if ((await sha256File(file.path)) !== file.sha256) return false;
     } catch {
       return false;
     }
@@ -683,16 +708,177 @@ async function readModelState(storagePath: string): Promise<ModelState> {
     if (!isRecord(parsed) || parsed.schema !== MODEL_STATE_SCHEMA) {
       throw new Error("Model catalog schema is unsupported or malformed.");
     }
-    if (!Array.isArray(parsed.acquisitions) || !Array.isArray(parsed.installedModels)) {
+    if (!validModelState(parsed, storagePath)) {
       throw new Error("Model catalog is incomplete or malformed.");
     }
-    return parsed as unknown as ModelState;
+    return parsed;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { schema: MODEL_STATE_SCHEMA, acquisitions: [], installedModels: [] };
     }
     throw error;
   }
+}
+
+function validModelState(value: unknown, storagePath: string): value is ModelState {
+  if (!isRecord(value)) return false;
+  if (!Array.isArray(value.acquisitions) || !Array.isArray(value.installedModels)) return false;
+  if (!value.acquisitions.every((item) => validAcquisition(item, storagePath))) return false;
+  if (!value.installedModels.every((item) => validInstalledModel(item, storagePath))) return false;
+  const acquisitions = value.acquisitions as ModelAcquisition[];
+  const installedModels = value.installedModels as InstalledModel[];
+  if (new Set(acquisitions.map((item) => item.id)).size !== acquisitions.length) return false;
+  if (new Set(installedModels.map((item) => item.id)).size !== installedModels.length) return false;
+  if (
+    new Set(installedModels.map((item) => item.displayName.toLocaleLowerCase("en-US"))).size !==
+    installedModels.length
+  ) {
+    return false;
+  }
+  const installedIds = new Set(installedModels.map((item) => item.id));
+  return acquisitions.every(
+    (item) =>
+      (item.status === "installed") === (item.installedModelId !== null) &&
+      (item.installedModelId === null || installedIds.has(item.installedModelId)),
+  );
+}
+
+function validAcquisition(value: unknown, storagePath: string): value is ModelAcquisition {
+  if (!isRecord(value)) return false;
+  const statuses = new Set(["planned", "incomplete", "failed", "installed", "discarded"]);
+  return (
+    typeof value.id === "string" &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.id) &&
+    typeof value.status === "string" &&
+    statuses.has(value.status) &&
+    typeof value.displayName === "string" &&
+    value.displayName.trim().length > 0 &&
+    value.storagePath === storagePath &&
+    nonNegativeSafeInteger(value.requiredBytes) &&
+    nonNegativeSafeInteger(value.availableBytes) &&
+    Array.isArray(value.files) &&
+    value.files.length > 0 &&
+    value.files.every(validPlannedFile) &&
+    new Set(
+      value.files.map((file) => (file as PlannedModelFile).fileName.toLocaleLowerCase("en-US")),
+    ).size === value.files.length &&
+    (value.installedModelId === null ||
+      (typeof value.installedModelId === "string" &&
+        /^[0-9a-f]{64}$/.test(value.installedModelId))) &&
+    (value.failure === null || typeof value.failure === "string")
+  );
+}
+
+function validPlannedFile(value: unknown): value is PlannedModelFile {
+  if (!isRecord(value) || !isRecord(value.sourceIdentity)) return false;
+  return (
+    typeof value.sourcePath === "string" &&
+    isAbsolute(value.sourcePath) &&
+    typeof value.fileName === "string" &&
+    value.fileName === basename(value.sourcePath) &&
+    (value.role === "model" || value.role === "companion") &&
+    (value.transfer === "adopt" || value.transfer === "copy") &&
+    nonNegativeSafeInteger(value.expectedSize) &&
+    nonNegativeSafeInteger(value.receivedBytes) &&
+    value.receivedBytes <= value.expectedSize &&
+    (value.publishedSha256 === null ||
+      (typeof value.publishedSha256 === "string" &&
+        /^[0-9a-f]{64}$/.test(value.publishedSha256))) &&
+    digitString(value.sourceIdentity.device) &&
+    digitString(value.sourceIdentity.inode) &&
+    digitString(value.sourceIdentity.modifiedNanoseconds) &&
+    value.sourceIdentity.size === value.expectedSize
+  );
+}
+
+function validInstalledModel(value: unknown, storagePath: string): value is InstalledModel {
+  if (!isRecord(value) || !isRecord(value.quantization)) return false;
+  const tensorTypes = value.quantization.tensorTypes;
+  if (
+    !isRecord(tensorTypes) ||
+    !Object.values(tensorTypes).every(
+      (count) => typeof count === "number" && Number.isSafeInteger(count) && count > 0,
+    )
+  ) {
+    return false;
+  }
+  if (!Array.isArray(value.files) || value.files.length === 0) return false;
+  if (
+    !value.files.every((file) => validInstalledFile(file, storagePath, String(value.id))) ||
+    value.files.filter((file) => isRecord(file) && file.role === "model").length === 0 ||
+    value.files.filter((file) => isRecord(file) && file.role === "companion").length > 1
+  ) {
+    return false;
+  }
+  const acquiredAt = typeof value.acquiredAt === "string" ? Date.parse(value.acquiredAt) : NaN;
+  return (
+    typeof value.id === "string" &&
+    /^[0-9a-f]{64}$/.test(value.id) &&
+    typeof value.displayName === "string" &&
+    value.displayName.trim().length > 0 &&
+    typeof value.available === "boolean" &&
+    typeof value.architecture === "string" &&
+    value.architecture.length > 0 &&
+    nonNegativeSafeInteger(value.parameterCount) &&
+    (value.quantization.fileType === null ||
+      (typeof value.quantization.fileType === "number" &&
+        Number.isFinite(value.quantization.fileType) &&
+        value.quantization.fileType >= 0)) &&
+    (value.trainingContext === null ||
+      (typeof value.trainingContext === "number" &&
+        Number.isFinite(value.trainingContext) &&
+        value.trainingContext >= 0)) &&
+    Array.isArray(value.templateHints) &&
+    value.templateHints.every((hint) => typeof hint === "string") &&
+    Number.isFinite(acquiredAt) &&
+    new Date(acquiredAt).toISOString() === value.acquiredAt
+  );
+}
+
+function validInstalledFile(value: unknown, storagePath: string, modelId: string): boolean {
+  if (!isRecord(value)) return false;
+  if (
+    typeof value.fileName !== "string" ||
+    value.fileName.length === 0 ||
+    value.fileName !== basename(value.fileName) ||
+    typeof value.path !== "string" ||
+    !isAbsolute(value.path) ||
+    (value.role !== "model" && value.role !== "companion") ||
+    !nonNegativeSafeInteger(value.size) ||
+    typeof value.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.sha256) ||
+    typeof value.managed !== "boolean"
+  ) {
+    return false;
+  }
+  const expectedManagedPath = join(storagePath, ".localhub-models", modelId, value.fileName);
+  if (
+    value.managed ? value.path !== expectedManagedPath : !safeAdoptedPath(storagePath, value.path)
+  ) {
+    return false;
+  }
+  if (value.shard === null) return true;
+  return (
+    isRecord(value.shard) &&
+    nonNegativeSafeInteger(value.shard.index) &&
+    nonNegativeSafeInteger(value.shard.count) &&
+    value.shard.count > 0 &&
+    value.shard.index < value.shard.count
+  );
+}
+
+function safeAdoptedPath(storagePath: string, path: string): boolean {
+  if (!pathInside(storagePath, path)) return false;
+  const first = relative(storagePath, path).split(/[\\/]/)[0] ?? "";
+  return !MANAGED_DIRECTORIES.has(first);
+}
+
+function nonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function digitString(value: unknown): value is string {
+  return typeof value === "string" && /^\d+$/.test(value);
 }
 
 async function writeModelState(storagePath: string, state: ModelState): Promise<void> {
@@ -802,7 +988,11 @@ async function inspectGguf(path: string): Promise<GgufInspection> {
           : Array.isArray(template)
             ? template.filter((item): item is string => typeof item === "string")
             : [],
-      projectorType: stringMetadata(metadata.get("clip.projector_type")),
+      projectorTypes: [
+        metadata.get("clip.projector_type"),
+        metadata.get("clip.vision.projector_type"),
+        metadata.get("clip.audio.projector_type"),
+      ].filter((value): value is string => typeof value === "string" && value.length > 0),
       split: splitMetadata(metadata, tensorCount, path),
     };
   } finally {
@@ -925,6 +1115,8 @@ function shouldKeepMetadata(key: string): boolean {
     key === "general.alignment" ||
     key === "tokenizer.chat_template" ||
     key === "clip.projector_type" ||
+    key === "clip.vision.projector_type" ||
+    key === "clip.audio.projector_type" ||
     key === "split.no" ||
     key === "split.count" ||
     key === "split.tensors.count" ||

@@ -262,12 +262,17 @@ export async function runModelAcquisitionSmoke(
       ]),
     );
     const acquisitionId = stringField(prepared, "id");
+    const plannedFiles = Array.isArray(prepared?.files) ? prepared.files : [];
+    const plannedFile = isRecord(plannedFiles[0]) ? plannedFiles[0] : null;
     if (
       acquisitionId &&
       prepared?.status === "planned" &&
       prepared.requiredBytes === exactSource.byteLength &&
-      Array.isArray(prepared.files) &&
-      prepared.files.length === 1
+      plannedFiles.length === 1 &&
+      plannedFile?.transfer === "copy" &&
+      plannedFile.expectedSize === exactSource.byteLength &&
+      plannedFile.receivedBytes === 0 &&
+      plannedFile.publishedSha256 === options.modelSourceSha256
     ) {
       passedSteps += 1;
     }

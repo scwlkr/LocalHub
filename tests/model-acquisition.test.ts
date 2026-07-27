@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/cli.ts";
@@ -10,6 +10,7 @@ import {
   importLocalModel,
   inspectInstalledModels,
   inspectModelAcquisitions,
+  MODEL_STATE_SCHEMA,
   prepareLocalModel,
   renameInstalledModel,
 } from "../src/model-acquisition.ts";
@@ -110,6 +111,37 @@ test("an unsupported GGUF architecture fails precisely and creates no Installed 
     "Unsupported GGUF architecture future-unknown",
   );
   expect(await inspectInstalledModels(storagePath)).toEqual([]);
+});
+
+test("Installed Model availability requires the exact verified bytes, not only the same path and size", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const sourcePath = join(root, "availability.gguf");
+  const sourceBytes = gguf({
+    architecture: "qwen2",
+    name: "Availability",
+    contextLength: 2048,
+  });
+  await writeFile(sourcePath, sourceBytes);
+  await mkdir(storagePath);
+  await prepareModelStorage(storagePath);
+  const acquisition = await prepareLocalModel(
+    {
+      displayName: "Availability",
+      files: [{ path: sourcePath, role: "model" }],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-availability" },
+  );
+  const installed = await importLocalModel(storagePath, acquisition.id);
+  const changedBytes = Buffer.from(sourceBytes);
+  changedBytes[changedBytes.length - 1] = 9;
+
+  await writeFile(installed.files[0]?.path ?? "", changedBytes);
+
+  expect((await inspectInstalledModels(storagePath))[0]?.available).toBeFalse();
+  await writeFile(installed.files[0]?.path ?? "", sourceBytes);
+  expect((await inspectInstalledModels(storagePath))[0]?.available).toBeTrue();
 });
 
 test("a complete pinned Q4_K tensor layout is verified before installation", async () => {
@@ -236,7 +268,7 @@ test("an exact projector companion is verified and included in content identity"
       architecture: "clip",
       name: "Vision Projector",
       contextLength: 4096,
-      projectorType: "qwen2vl",
+      projectorType: "qwen2vl_merger",
     }),
   );
   await mkdir(storagePath);
@@ -257,6 +289,44 @@ test("an exact projector companion is verified and included in content identity"
 
   expect(installed.files.map((file) => file.role)).toEqual(["model", "companion"]);
   expect(installed.id).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("a clip companion with an unknown pinned projector type fails before installation", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const modelPath = join(root, "model.gguf");
+  const companionPath = join(root, "unknown-projector.gguf");
+  await writeFile(
+    modelPath,
+    gguf({ architecture: "qwen2vl", name: "Vision Model", contextLength: 4096 }),
+  );
+  await writeFile(
+    companionPath,
+    gguf({
+      architecture: "clip",
+      name: "Unknown Projector",
+      contextLength: 4096,
+      projectorType: "future-projector",
+    }),
+  );
+  await mkdir(storagePath);
+  await prepareModelStorage(storagePath);
+  const acquisition = await prepareLocalModel(
+    {
+      displayName: "Unknown Projector",
+      files: [
+        { path: modelPath, role: "model" },
+        { path: companionPath, role: "companion" },
+      ],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-unknown-projector" },
+  );
+
+  await expect(importLocalModel(storagePath, acquisition.id)).rejects.toThrow(
+    "Wrong companion GGUF unknown-projector.gguf",
+  );
+  expect(await inspectInstalledModels(storagePath)).toEqual([]);
 });
 
 test("an interrupted copy remains explicitly Incomplete and resumes only the same source", async () => {
@@ -307,6 +377,34 @@ test("an interrupted copy remains explicitly Incomplete and resumes only the sam
     status: "installed",
     installedModelId: installed.id,
   });
+});
+
+test("a source changed during local copy is rejected after transfer and never installed", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const sourcePath = join(root, "changing.gguf");
+  const sourceBytes = gguf({ architecture: "qwen2", name: "Changing", contextLength: 2048 });
+  const changedBytes = Buffer.from(sourceBytes);
+  changedBytes[changedBytes.length - 1] = 9;
+  await writeFile(sourcePath, sourceBytes);
+  await mkdir(storagePath);
+  await prepareModelStorage(storagePath);
+  const acquisition = await prepareLocalModel(
+    {
+      displayName: "Changing",
+      files: [{ path: sourcePath, role: "model" }],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-changing" },
+  );
+
+  await expect(
+    importLocalModel(storagePath, acquisition.id, {
+      copyChunkBytes: sourceBytes.length,
+      afterCopyChunk: async () => await writeFile(sourcePath, changedBytes),
+    }),
+  ).rejects.toThrow("Selected local source changed after confirmation");
+  expect(await inspectInstalledModels(storagePath)).toEqual([]);
 });
 
 test("discard removes only incomplete staging and never an Installed Model", async () => {
@@ -427,6 +525,7 @@ test("inside-storage adoption, duplicate import, and display rename preserve one
   expect(first.files[0]).toMatchObject({ transfer: "adopt", receivedBytes: 0 });
   const installed = await importLocalModel(storagePath, first.id);
   expect(installed.files[0]).toMatchObject({ path: sourcePath, managed: false });
+  expect(await readdir(join(storagePath, ".localhub-staging"))).not.toContain(first.id);
 
   const renamed = await renameInstalledModel(storagePath, installed.id, "Renamed Label");
 
@@ -443,6 +542,107 @@ test("inside-storage adoption, duplicate import, and display rename preserve one
   const reused = await importLocalModel(storagePath, duplicate.id);
   expect(reused).toMatchObject({ id: installed.id, displayName: "Renamed Label" });
   expect(await inspectInstalledModels(storagePath)).toHaveLength(1);
+});
+
+test("two frozen plans cannot install different content under one case-insensitive display name", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const firstPath = join(root, "first.gguf");
+  const secondPath = join(root, "second.gguf");
+  await writeFile(firstPath, gguf({ architecture: "qwen2", name: "First", contextLength: 2048 }));
+  await writeFile(secondPath, gguf({ architecture: "qwen2", name: "Second", contextLength: 2048 }));
+  await mkdir(storagePath);
+  await prepareModelStorage(storagePath);
+  const first = await prepareLocalModel(
+    {
+      displayName: "Shared Label",
+      files: [{ path: firstPath, role: "model" }],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-first-label" },
+  );
+  const second = await prepareLocalModel(
+    {
+      displayName: "shared label",
+      files: [{ path: secondPath, role: "model" }],
+      storagePath,
+    },
+    { acquisitionId: () => "acquisition-second-label" },
+  );
+
+  await importLocalModel(storagePath, first.id);
+
+  await expect(importLocalModel(storagePath, second.id)).rejects.toThrow(
+    "Installed Model display name is already in use",
+  );
+  expect(await inspectInstalledModels(storagePath)).toHaveLength(1);
+});
+
+test("preparation rejects two exact selections with the same destination filename", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const firstDirectory = join(root, "first");
+  const secondDirectory = join(root, "second");
+  await mkdir(storagePath);
+  await mkdir(firstDirectory);
+  await mkdir(secondDirectory);
+  await prepareModelStorage(storagePath);
+  await writeFile(
+    join(firstDirectory, "model.gguf"),
+    gguf({ architecture: "qwen2", name: "First", contextLength: 2048 }),
+  );
+  await writeFile(
+    join(secondDirectory, "model.gguf"),
+    gguf({ architecture: "qwen2", name: "Second", contextLength: 2048 }),
+  );
+
+  await expect(
+    prepareLocalModel({
+      displayName: "Repeated Filename",
+      files: [
+        { path: join(firstDirectory, "model.gguf"), role: "model" },
+        { path: join(secondDirectory, "model.gguf"), role: "model" },
+      ],
+      storagePath,
+    }),
+  ).rejects.toThrow("Selected local filename is repeated");
+  expect(await inspectModelAcquisitions(storagePath)).toEqual([]);
+});
+
+test("a malformed catalog acquisition cannot escape staging during discard", async () => {
+  const root = await isolatedRoot();
+  const storagePath = join(root, "models");
+  const protectedDirectory = join(storagePath, "protected");
+  const protectedFile = join(protectedDirectory, "keep.txt");
+  await mkdir(storagePath);
+  await prepareModelStorage(storagePath);
+  await mkdir(protectedDirectory);
+  await writeFile(protectedFile, "keep");
+  await writeFile(
+    join(storagePath, ".localhub-catalog", "models.json"),
+    `${JSON.stringify({
+      schema: MODEL_STATE_SCHEMA,
+      acquisitions: [
+        {
+          id: "../../protected",
+          status: "failed",
+          displayName: "Unsafe",
+          storagePath,
+          requiredBytes: 0,
+          availableBytes: 0,
+          files: [],
+          installedModelId: null,
+          failure: "malformed",
+        },
+      ],
+      installedModels: [],
+    })}\n`,
+  );
+
+  await expect(discardModelAcquisition(storagePath, "../../protected")).rejects.toThrow(
+    "Model catalog is incomplete or malformed",
+  );
+  expect(await readFile(protectedFile, "utf8")).toBe("keep");
 });
 
 test("an unreadable selected file fails precisely before an acquisition is recorded", async () => {

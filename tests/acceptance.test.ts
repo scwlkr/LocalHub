@@ -130,7 +130,14 @@ test("the model acquisition driver keeps staged bytes out of inventory and prove
       id: "acquisition-1",
       status: "planned",
       requiredBytes: source.length,
-      files: [{ receivedBytes: 0, publishedSha256: sourceSha256 }],
+      files: [
+        {
+          transfer: "copy",
+          expectedSize: source.length,
+          receivedBytes: 0,
+          publishedSha256: sourceSha256,
+        },
+      ],
     }),
     "[]",
     JSON.stringify({
