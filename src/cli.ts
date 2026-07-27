@@ -3,13 +3,15 @@
 import { buildCodexProcess, runCodex } from "./codex.ts";
 import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
+import { validateEvidenceRecord } from "./evidence.ts";
 import { renderDoctor, renderStatus } from "./presentation.ts";
+import { verifyReleaseCandidate } from "./release.ts";
 import { collectRuntime } from "./runtime.ts";
 import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
 import type { LocalHubConfig } from "./types.ts";
-
-export const VERSION = "0.1.1";
+export { VERSION } from "./version.ts";
+import { VERSION } from "./version.ts";
 
 const HELP = `LocalHub ${VERSION}
 
@@ -18,6 +20,10 @@ Usage:
   lh setup           Configure Windows access with a guided wizard
   lh status          Show system, route, server, and model state
   lh doctor          Check setup and print concise fixes
+  lh release identity <release-candidate.json>
+                     Verify and print the exact assembled candidate identity
+  lh evidence validate <release-candidate.json> <evidence.json>
+                     Reject malformed, stale, sensitive, or mismatched evidence
   lh --help          Show this help
 
 TUI keys:
@@ -41,6 +47,7 @@ export interface CliDependencies {
   interactive?: boolean;
   load?: typeof loadConfig;
   env?: NodeJS.ProcessEnv;
+  executablePath?: string;
   platform?: NodeJS.Platform;
   runInteractive?: typeof runTui;
   runLocalCodex?: typeof runCodex;
@@ -55,6 +62,46 @@ export async function main(
   args = Bun.argv.slice(2),
   dependencies: CliDependencies = {},
 ): Promise<number> {
+  if (args[0] === "release") {
+    if (args.length !== 3 || args[1] !== "identity") {
+      console.error("Usage: lh release identity <release-candidate.json>");
+      return 2;
+    }
+    try {
+      const candidate = await verifyReleaseCandidate(
+        args[2] ?? "",
+        dependencies.executablePath ?? process.execPath,
+      );
+      console.log(JSON.stringify(candidate, null, 2));
+      return 0;
+    } catch (error) {
+      console.error(`Release identity verification failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
+  if (args[0] === "evidence") {
+    if (args.length !== 4 || args[1] !== "validate") {
+      console.error("Usage: lh evidence validate <release-candidate.json> <evidence.json>");
+      return 2;
+    }
+    try {
+      const candidate = await verifyReleaseCandidate(
+        args[2] ?? "",
+        dependencies.executablePath ?? process.execPath,
+      );
+      const record = await Bun.file(args[3] ?? "").json();
+      const evidence = validateEvidenceRecord(record, candidate);
+      console.log(
+        evidence.releaseEvidence
+          ? `Evidence valid for assembled candidate ${candidate.candidate.candidateId}.`
+          : `Controlled dependency evidence valid for ${candidate.candidate.candidateId}; it is not release evidence.`,
+      );
+      return 0;
+    } catch (error) {
+      console.error(`Evidence validation failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
   const command = parseCommand(args);
   if (command === "help") {
     console.log(HELP);

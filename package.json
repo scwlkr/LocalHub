@@ -17,7 +17,9 @@
     "check": "bun run format:check && bun run lint && bun run typecheck && bun test",
     "build:macos-arm64": "bun run scripts/build.ts bun-darwin-arm64",
     "build:windows-x64": "bun run scripts/build.ts bun-windows-x64",
-    "build": "bun run scripts/build.ts"
+    "build": "bun run scripts/build.ts",
+    "candidate:assemble": "bun run scripts/assemble-candidate.ts",
+    "candidate:smoke": "bun run scripts/run-candidate-smoke.ts"
   },
   "dependencies": {
     "@opentui/core": "0.4.5"

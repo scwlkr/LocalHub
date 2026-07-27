@@ -200,6 +200,8 @@ placement matters.
 | `lh setup` | Guide Windows through LM Link or authenticated direct LAN |
 | `lh status` | Print system, route, server, auth, Codex, context, and model state |
 | `lh doctor` | Run setup checks and print concise fixes |
+| `lh release identity <release-candidate.json>` | Verify the executing assembled asset and print its exact identity |
+| `lh evidence validate <release-candidate.json> <evidence.json>` | Reject stale, malformed, sensitive, or mismatched evidence |
 | `lh --help` | Show usage and keys |
 | `lh --version` | Print the LocalHub version |
 
@@ -352,6 +354,7 @@ Run `lh doctor` after each setup change.
 bun install --frozen-lockfile
 bun run check
 bun run build
+bun run candidate:assemble
 ```
 
 `bun run check` runs formatting checks, linting, strict TypeScript checking,
@@ -359,8 +362,14 @@ and focused Bun tests. The tests mock network and process boundaries; they do
 not claim live LM Studio, LM Link, model-quality, or physical-device coverage.
 `bun run build` produces the standalone executable for the current host and
 smoke-tests it. macOS builds receive an ad hoc signature; Windows builds are
-unsigned. CI is configured to build and smoke-test each target on its native
-host.
+unsigned. From a clean exact commit, `bun run candidate:assemble` creates the
+macOS arm64 expand-phase candidate record, manifest, and copied executable
+under `dist/candidates/`. It records future v1 dependency pins without claiming
+that unshipped runtimes are present. CI drives the assembled binary's public
+identity, help, version, status, and evidence-validation commands, then retains
+the sanitized candidate/evidence artifact. Controlled-dependency results remain
+explicitly ineligible as release evidence. CI also builds and smoke-tests the
+legacy executable on each native host.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
