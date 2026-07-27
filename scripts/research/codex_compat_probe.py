@@ -256,7 +256,7 @@ def provider_command(codex: str, base_url: str, workspace: Path, prompt: str) ->
         "shell_environment_policy.ignore_default_excludes=false",
     ]
     if os.name == "nt":
-        settings.append('permissions.sandbox="unelevated"')
+        settings.append('windows.sandbox="unelevated"')
     command = [
         codex,
         "exec",
