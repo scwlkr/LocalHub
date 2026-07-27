@@ -155,8 +155,14 @@ export function createMemberGatewayHandler(
       return memberResponse("Member Link host did not match.", { status: 421 });
     }
     const origin = request.headers.get("origin");
-    if (origin && !allowedHosts.has(new URL(origin).host.toLowerCase())) {
-      return memberResponse("Cross-origin Member request denied.", { status: 403 });
+    if (origin) {
+      try {
+        if (!allowedHosts.has(new URL(origin).host.toLowerCase())) {
+          return memberResponse("Cross-origin Member request denied.", { status: 403 });
+        }
+      } catch {
+        return memberResponse("Cross-origin Member request denied.", { status: 403 });
+      }
     }
     const path = new URL(request.url).pathname;
     if (request.method === "GET" && (path === "/" || path === "/readiness")) {

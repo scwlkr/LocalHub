@@ -101,6 +101,13 @@ test("Member listener accepts only the selected subnet and exposes no Host route
   );
   expect(hostRoute.status).toBe(404);
 
+  const malformedOrigin = await allowed(
+    new Request("http://192.168.50.20:39283/", {
+      headers: { host: "192.168.50.20:39283", origin: "not a URL" },
+    }),
+  );
+  expect(malformedOrigin.status).toBe(403);
+
   const wrongSubnet = createMemberGatewayHandler(binding, () => "192.168.51.99");
   const denied = await wrongSubnet(
     new Request("http://192.168.50.20:39283/", {

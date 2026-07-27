@@ -573,6 +573,7 @@ export async function stopLocalHubRun(options: {
       acceptingWork: false,
       host: { ...state.host, health: "closed" },
       llama: { ...state.llama, health: "closed" },
+      member: state.member ? { ...state.member, health: "closed", bonjourPublished: false } : null,
       stop: { activeWork: state.activeWork, forcedProcesses: [] },
       updatedAt: new Date().toISOString(),
     };

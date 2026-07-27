@@ -106,6 +106,29 @@ test("Host checks fail closed on wrong architecture and unavailable private inte
   });
 });
 
+test("Host checks fail closed when the firewall blocks all incoming Member access", () => {
+  const report = evaluateHostComputer({
+    platform: "darwin",
+    architecture: "arm64",
+    osVersion: "27.0",
+    freeBytes: 500_000_000_000,
+    interfaces: [{ name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" }],
+    firewall: { enabled: true, blockAll: true, localHubAllowed: false },
+    sleep: { wakeForNetworkAccess: false },
+  });
+
+  expect(report.passed).toBe(false);
+  expect(report.results.find((item) => item.name === "Firewall")).toMatchObject({
+    status: "failed",
+    detail: expect.stringContaining("Block all"),
+  });
+  expect(report.failure).toMatchObject({
+    protectedState: expect.stringContaining("Member gateway remains closed"),
+    repair: expect.any(String),
+    recheck: expect.any(String),
+  });
+});
+
 test("Guided Runway performs each approved action once and reaches honest Ready", async () => {
   const root = await isolatedRoot();
   const candidate = verifiedCandidate("unnotarized");

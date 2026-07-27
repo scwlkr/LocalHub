@@ -6,6 +6,7 @@ import {
   RUN_STATE_SCHEMA,
   buildLlamaLaunch,
   buildSupervisorLaunch,
+  currentPrivateInterfaces,
   inspectLocalHubRun,
   serveLocalHubRun,
   stopLocalHubRun,
@@ -13,6 +14,7 @@ import {
   type LocalHubRunState,
   type RunBundle,
 } from "../src/run.ts";
+import { createMemberBinding } from "../src/member-gateway.ts";
 
 const testRoots: string[] = [];
 const macOSProcessTest = process.platform === "darwin" ? test : test.skip;
@@ -280,6 +282,44 @@ test("stop preserves a failed Host when its recorded identity is not proven", as
   }
 });
 
+test("stop marks an already-dead failed Run's recorded Member Link closed", async () => {
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  await mkdir(stateDirectory, { recursive: true });
+  const base = runningState();
+  await writeRunState(stateDirectory, {
+    ...base,
+    status: "failed",
+    acceptingWork: false,
+    member: {
+      interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
+      bonjourName: "localhub-test.local",
+      port: 39283,
+      friendlyUrl: "http://localhub-test.local:39283",
+      ipv4Url: "http://192.168.50.20:39283",
+      listener: "192.168.50.20:39283",
+      health: "ready",
+      bonjourPublished: true,
+      failure: null,
+    },
+    failure: {
+      cause: "The exact recorded Run is already offline.",
+      protectedState: "No substitute started.",
+      stillWorks: "Recorded state remains available.",
+      repair: "Stop the recorded Run.",
+      recheck: "Run `lh run status` again.",
+    },
+  });
+
+  const stopped = await stopLocalHubRun({
+    stateDirectory,
+    processAlive: () => false,
+  });
+
+  expect(stopped?.status).toBe("stopped");
+  expect(stopped?.member).toMatchObject({ health: "closed", bonjourPublished: false });
+});
+
 test("a timed-out stop never signals a process without a fresh ownership proof", async () => {
   const root = await isolatedRoot();
   const stateDirectory = join(root, "state");
@@ -471,6 +511,135 @@ macOSProcessTest(
   },
 );
 
+macOSProcessTest("mDNS publication failure closes the selected-interface gateway", async () => {
+  const selected = currentPrivateInterfaces()[0];
+  if (!selected) throw new Error("The supported macOS test lane has no private interface.");
+  const root = await isolatedRoot();
+  const stateDirectory = join(root, "state");
+  const runtimeDirectory = join(root, "runtime");
+  await mkdir(runtimeDirectory, { recursive: true });
+  const fakeLlama = join(runtimeDirectory, "llama-server");
+  await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+  const [hostPort, llamaPort, memberPort] = await Promise.all([
+    availablePort(),
+    availablePort(),
+    availablePortOn(selected.address),
+  ]);
+  const member = await createMemberBinding({
+    selected,
+    available: [selected],
+    bonjourName: "localhub-test.local",
+    port: memberPort,
+  });
+
+  await expect(
+    serveLocalHubRun({
+      bundle: bundle(fakeLlama),
+      hostPort,
+      llamaPort,
+      stateDirectory,
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 500,
+      member,
+      currentInterfaces: () => [selected],
+      publishBonjour: async () => {
+        throw new Error("controlled mDNS publication failure");
+      },
+    }),
+  ).rejects.toThrow("controlled mDNS publication failure");
+
+  const failed = await waitForState(stateDirectory, "failed");
+  expect(failed.member).toMatchObject({ health: "closed", bonjourPublished: false });
+  await expect(fetch(member.ipv4Url)).rejects.toThrow();
+});
+
+macOSProcessTest(
+  "network change and wake withdraw Member access until explicit same-interface recheck",
+  async () => {
+    const selected = currentPrivateInterfaces()[0];
+    if (!selected) throw new Error("The supported macOS test lane has no private interface.");
+    const root = await isolatedRoot();
+    const stateDirectory = join(root, "state");
+    const runtimeDirectory = join(root, "runtime");
+    await mkdir(runtimeDirectory, { recursive: true });
+    const fakeLlama = join(runtimeDirectory, "llama-server");
+    await writeFile(fakeLlama, fakeLlamaSource(), { mode: 0o755 });
+    const [hostPort, llamaPort, memberPort] = await Promise.all([
+      availablePort(),
+      availablePort(),
+      availablePortOn(selected.address),
+    ]);
+    const binding = await createMemberBinding({
+      selected,
+      available: [selected],
+      bonjourName: "localhub-test.local",
+      port: memberPort,
+    });
+    let visibleInterfaces = [selected];
+    let publicationStops = 0;
+    const supervisor = serveLocalHubRun({
+      bundle: bundle(fakeLlama),
+      hostPort,
+      llamaPort,
+      stateDirectory,
+      startupDeadlineMs: 2_000,
+      stopDeadlineMs: 500,
+      member: binding,
+      currentInterfaces: () => visibleInterfaces,
+      memberCheckIntervalMs: 10,
+      publishBonjour: async () => ({
+        async stop() {
+          publicationStops += 1;
+        },
+      }),
+    });
+    const running = await waitForState(stateDirectory, "running");
+    try {
+      const initial = await fetch(binding.ipv4Url, {
+        headers: { host: new URL(binding.ipv4Url).host },
+      });
+      expect(initial.status).toBe(200);
+
+      visibleInterfaces = [];
+      const withdrawn = await waitForMemberHealth(stateDirectory, "recheck-required");
+      expect(withdrawn.member?.failure).toMatchObject({
+        cause: expect.stringContaining("changed"),
+        protectedState: expect.stringContaining("old Member Link is closed"),
+        repair: expect.stringContaining("recheck"),
+        recheck: expect.stringContaining("recheck"),
+      });
+      await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+
+      visibleInterfaces = [selected];
+      const rechecked = await fetch(`${running.host.origin}/member/recheck`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+      expect(rechecked.status).toBe(200);
+      expect((await rechecked.json()) as object).toMatchObject({
+        status: "ready",
+        member: { health: "ready", bonjourPublished: true },
+      });
+      expect(
+        await fetch(binding.ipv4Url, {
+          headers: { host: new URL(binding.ipv4Url).host },
+        }).then((response) => response.status),
+      ).toBe(200);
+    } finally {
+      await fetch(`${running.host.origin}/stop`, {
+        method: "POST",
+        headers: { "x-localhub-run-id": running.runId },
+      });
+      await supervisor;
+    }
+
+    const stopped = await waitForState(stateDirectory, "stopped");
+    expect(stopped.member).toMatchObject({ health: "closed", bonjourPublished: false });
+    expect(publicationStops).toBe(2);
+    await expect(fetch(binding.ipv4Url)).rejects.toThrow();
+  },
+);
+
 macOSProcessTest(
   "a macOS worker crash fails closed with no hidden restart or orphan listener",
   async () => {
@@ -605,6 +774,14 @@ async function availablePort(): Promise<number> {
   return port;
 }
 
+async function availablePortOn(hostname: string): Promise<number> {
+  const server = Bun.serve({ hostname, port: 0, fetch: () => new Response("ok") });
+  const port = server.port;
+  await server.stop(true);
+  if (port === undefined) throw new Error("Bun did not assign a selected-interface test port.");
+  return port;
+}
+
 async function waitForState(
   stateDirectory: string,
   expected: LocalHubRunState["status"],
@@ -623,6 +800,24 @@ async function waitForState(
     await Bun.sleep(10);
   }
   throw new Error(`Timed out waiting for ${expected} run state.`);
+}
+
+async function waitForMemberHealth(
+  stateDirectory: string,
+  expected: NonNullable<LocalHubRunState["member"]>["health"],
+  deadlineMs = 3_000,
+): Promise<LocalHubRunState> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    try {
+      const state = JSON.parse(await readFile(join(stateDirectory, "run-state.json"), "utf8"));
+      if (state.member?.health === expected) return state;
+    } catch {
+      // The supervisor has not committed the Member state yet.
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for ${expected} Member health.`);
 }
 
 async function waitForListenerClosed(origin: string): Promise<void> {
