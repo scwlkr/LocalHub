@@ -32,6 +32,7 @@ export interface PrepareLocalModelOptions {
 export interface ModelAcquisitionDependencies {
   acquisitionId?: () => string;
   availableBytes?: (storagePath: string) => Promise<number>;
+  confirmReadable?: (path: string) => Promise<void>;
 }
 
 export interface ModelImportDependencies {
@@ -197,6 +198,11 @@ export async function prepareLocalModel(
     }
     selectedFileNames.add(foldedFileName);
     const source = await readableRegularFile(sourcePath);
+    try {
+      await dependencies.confirmReadable?.(sourcePath);
+    } catch (error) {
+      throw new Error(`Selected local GGUF is unreadable: ${sourcePath}. ${errorMessage(error)}`);
+    }
     const canonicalSourcePath = await realpath(sourcePath);
     const insideStorage = pathInside(canonicalStoragePath, canonicalSourcePath);
     if (

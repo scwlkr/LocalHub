@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { main } from "../src/cli.ts";
@@ -653,16 +653,18 @@ test("an unreadable selected file fails precisely before an acquisition is recor
     sourcePath,
     gguf({ architecture: "qwen2", name: "Unreadable", contextLength: 2048 }),
   );
-  await chmod(sourcePath, 0o000);
   await mkdir(storagePath);
   await prepareModelStorage(storagePath);
 
   await expect(
-    prepareLocalModel({
-      displayName: "Unreadable",
-      files: [{ path: sourcePath, role: "model" }],
-      storagePath,
-    }),
+    prepareLocalModel(
+      {
+        displayName: "Unreadable",
+        files: [{ path: sourcePath, role: "model" }],
+        storagePath,
+      },
+      { confirmReadable: async () => await Promise.reject(new Error("controlled read denial")) },
+    ),
   ).rejects.toThrow("Selected local GGUF is unreadable");
   expect(await inspectModelAcquisitions(storagePath)).toEqual([]);
 });
