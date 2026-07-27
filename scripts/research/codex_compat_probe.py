@@ -145,6 +145,7 @@ class FakeResponsesHandler(BaseHTTPRequestHandler):
                         "operation not permitted",
                         "permission denied",
                         "access is denied",
+                        "blocked by policy",
                         "exit code: 1",
                         "exited with code 1",
                     )
@@ -254,6 +255,8 @@ def provider_command(codex: str, base_url: str, workspace: Path, prompt: str) ->
         'web_search="disabled"',
         "shell_environment_policy.ignore_default_excludes=false",
     ]
+    if os.name == "nt":
+        settings.append('permissions.sandbox="unelevated"')
     command = [
         codex,
         "exec",
@@ -571,6 +574,7 @@ def main() -> int:
             result["member_tool_round_trip"]["marker_in_member_workspace"],
             result["outside_workspace_denial"]["outside_marker_absent"],
             result["outside_workspace_denial"]["function_output_returned"],
+            result["outside_workspace_denial"]["function_output_reports_denial"],
             result["context_failure"]["client_exit_nonzero"],
             result["context_failure"]["error_surfaced"],
             all(result["cancellation"].values()),
