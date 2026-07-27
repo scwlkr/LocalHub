@@ -185,7 +185,7 @@ test("the model acquisition driver keeps staged bytes out of inventory and prove
       network: {
         fetch: async (request) =>
           new URL(String(request)).port === "39282"
-            ? Response.json([])
+            ? Response.json({ object: "list", data: [] })
             : Response.json({ installedModels: [{ id: contentId, available: true }] }),
       },
       llamaCpp: { origin: "controlled" },

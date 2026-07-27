@@ -97,7 +97,7 @@ async function ggufs(path) {
 const server = Bun.serve({ hostname: value("--host"), port: Number(value("--port")), async fetch(request) {
   const path = new URL(request.url).pathname;
   if (path === "/health") return Response.json({ status: "ok" });
-  if (path === "/models") { const models = await ggufs(value("--models-dir")); await writeFile(${JSON.stringify(markerPath)}, String(models.length)); return Response.json(models); }
+  if (path === "/models") { const models = await ggufs(value("--models-dir")); await writeFile(${JSON.stringify(markerPath)}, String(models.length)); return Response.json({ object: "list", data: models }); }
   return new Response("Not found", { status: 404 });
 }});
 process.on("SIGTERM", async () => { await server.stop(true); process.exit(0); });

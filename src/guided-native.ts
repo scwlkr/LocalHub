@@ -216,7 +216,7 @@ export async function verifyPinnedRuntime(
       signal: AbortSignal.timeout(Math.max(1, Math.min(1_000, remaining(deadline)))),
     });
     const routerModels: unknown = modelsResponse.ok ? await modelsResponse.json() : null;
-    if (!Array.isArray(routerModels) || routerModels.length !== 0) {
+    if (!emptyRouterInventory(routerModels)) {
       throw new Error(
         "Pinned llama.cpp sealed router exposed a model before exact Installed Model selection.",
       );
@@ -251,6 +251,17 @@ export async function verifyPinnedRuntime(
     noModelLoaded: true,
     deadlineMs,
   };
+}
+
+function emptyRouterInventory(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { object?: unknown }).object === "list" &&
+    Array.isArray((value as { data?: unknown }).data) &&
+    (value as { data: unknown[] }).data.length === 0
+  );
 }
 
 export async function resolveBonjourName(): Promise<string> {

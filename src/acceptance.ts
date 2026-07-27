@@ -360,7 +360,7 @@ export async function runModelAcquisitionSmoke(
     if (llamaOrigin) {
       const response = await dependencies.network.fetch(`${llamaOrigin}/models`);
       const body: unknown = response.ok ? await response.json() : null;
-      if (Array.isArray(body) && body.length === 0) passedSteps += 1;
+      if (emptyRouterInventory(body)) passedSteps += 1;
     }
 
     const stoppedResult = jsonObjectResult(
@@ -441,6 +441,15 @@ function stringField(value: unknown, key: string): string | null {
 
 function numberField(value: unknown, key: string): number | null {
   return isRecord(value) && typeof value[key] === "number" ? value[key] : null;
+}
+
+function emptyRouterInventory(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.object === "list" &&
+    Array.isArray(value.data) &&
+    value.data.length === 0
+  );
 }
 
 function sha256(value: Uint8Array): string {

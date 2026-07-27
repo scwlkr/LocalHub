@@ -589,7 +589,7 @@ macOSProcessTest(
     expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
     expect(
       await fetch(`http://127.0.0.1:${llamaPort}/models`).then((response) => response.json()),
-    ).toEqual([]);
+    ).toEqual({ object: "list", data: [] });
     expect(
       await fetch(`http://127.0.0.1:${hostPort}/models`).then((response) => response.json()),
     ).toMatchObject({
@@ -1365,7 +1365,7 @@ const server = Bun.serve({
     const path = new URL(request.url).pathname;
     if (path === "/health") return Response.json({ status: "ok" }, { status: ${options.healthStatus ?? 200} });
     if (path === "/slots") return Response.json([]);
-    if (path === "/models") return Response.json(await ggufs(value("--models-dir")));
+    if (path === "/models") return Response.json({ object: "list", data: await ggufs(value("--models-dir")) });
     return new Response("Not found", { status: 404 });
   },
 });
