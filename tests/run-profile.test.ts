@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { main } from "../src/cli.ts";
 import type { InstalledModel } from "../src/model-acquisition.ts";
@@ -457,7 +457,7 @@ test("profile catalog rejects symlinks and malformed records and reclaims a dead
   ).rejects.toThrow("not a safe folder");
   expect(await readFile(join(protectedPath, "keep.txt"), "utf8")).toBe("keep");
 
-  await rm(catalogPath);
+  await unlink(catalogPath);
   await mkdir(catalogPath, { mode: 0o700 });
   const lockPath = join(catalogPath, "mutation.lock");
   await mkdir(lockPath, { mode: 0o700 });
