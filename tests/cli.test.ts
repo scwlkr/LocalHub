@@ -1,6 +1,51 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { main } from "../src/cli.ts";
 import { defaultConfig } from "../src/config.ts";
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+test("an assembled candidate enters Guided First Run by default", async () => {
+  const root = await isolatedRoot();
+  const candidateRecordPath = join(root, "release-candidate.json");
+  await writeFile(candidateRecordPath, "{}\n");
+  const calls: string[] = [];
+
+  const code = await main([], {
+    interactive: true,
+    executablePath: join(root, "lh"),
+    runCandidateRecordPath: candidateRecordPath,
+    runFirstRun: async (options) => {
+      calls.push(`${options.candidateRecordPath}:${options.executablePath}`);
+      return "ready";
+    },
+  });
+
+  expect(code).toBe(0);
+  expect(calls).toEqual([`${candidateRecordPath}:${join(root, "lh")}`]);
+});
+
+test("explicit First Run refuses a non-interactive session before any action", async () => {
+  let runs = 0;
+  const result = await captureErrors(() =>
+    main(["first-run"], {
+      interactive: false,
+      runFirstRun: async () => {
+        runs += 1;
+        return "ready";
+      },
+    }),
+  );
+
+  expect(result.code).toBe(2);
+  expect(runs).toBe(0);
+  expect(result.errors).toEqual(["Guided First Run needs an interactive Host terminal."]);
+});
 
 test("CLI turns renderer startup failures into a concise fix", async () => {
   const result = await captureErrors(() =>
@@ -219,4 +264,12 @@ async function captureErrors(run: () => Promise<number>): Promise<{
   } finally {
     console.error = original;
   }
+}
+
+async function isolatedRoot(): Promise<string> {
+  const parent = join(process.cwd(), "dist", "test-tmp");
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, "cli-first-run-"));
+  roots.push(root);
+  return root;
 }

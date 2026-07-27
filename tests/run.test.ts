@@ -88,6 +88,49 @@ test("the supervisor launch survives terminal loss without inheriting terminal s
   ]);
 });
 
+test("the supervisor receives one explicit selected-interface Member boundary", () => {
+  const launch = buildSupervisorLaunch({
+    candidateRecordPath: "/candidate/release-candidate.json",
+    executablePath: "/candidate/lh",
+    hostPort: 39281,
+    llamaPort: 39282,
+    logPath: "/state/run.log",
+    stateDirectory: "/state",
+    modelsDirectory: "/models",
+    member: {
+      interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
+      bonjourName: "localhub-test.local",
+      port: 39283,
+    },
+  });
+
+  expect(launch.command).toEqual([
+    "/candidate/lh",
+    "__run-agent",
+    "--candidate",
+    "/candidate/release-candidate.json",
+    "--state-dir",
+    "/state",
+    "--host-port",
+    "39281",
+    "--llama-port",
+    "39282",
+    "--models-dir",
+    "/models",
+    "--member-interface",
+    "en0",
+    "--member-address",
+    "192.168.50.20",
+    "--member-netmask",
+    "255.255.255.0",
+    "--bonjour-name",
+    "localhub-test.local",
+    "--member-port",
+    "39283",
+  ]);
+  expect(launch.command).not.toContain("0.0.0.0");
+});
+
 test("the shipped CLI exposes explicit start/status/stop without replacing legacy status", async () => {
   const state = runningState();
   const calls: string[] = [];
@@ -130,6 +173,31 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
   expect(calls).toEqual(["start:/candidate/release-candidate.json:/state", "stop"]);
   expect(start.output.join("\n")).toContain('"model": null');
   expect(status.output.join("\n")).toContain('"listener": "127.0.0.1:39282"');
+});
+
+test("the shipped CLI exposes one explicit Member recheck", async () => {
+  const result = await captureOutput(() =>
+    main(["member", "recheck"], {
+      runStateDirectory: "/state",
+      recheckMember: async (stateDirectory) => {
+        expect(stateDirectory).toBe("/state");
+        return {
+          interface: { name: "en0", address: "192.168.50.20", netmask: "255.255.255.0" },
+          bonjourName: "localhub-test.local",
+          port: 39283,
+          friendlyUrl: "http://localhub-test.local:39283",
+          ipv4Url: "http://192.168.50.20:39283",
+          listener: "192.168.50.20:39283",
+          health: "ready",
+          bonjourPublished: true,
+          failure: null,
+        };
+      },
+    }),
+  );
+
+  expect(result.code).toBe(0);
+  expect(result.output.join("\n")).toContain('"action": "member-recheck"');
 });
 
 test("status rejects a wrong process identity and preserves it", async () => {

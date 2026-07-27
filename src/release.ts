@@ -50,6 +50,13 @@ const REQUIRED_DEPENDENCIES = [
     included: false,
     digest: "sha256:6b5787eb43a997e1214f627480068396e434b0ba5b3761be382dcd3daa9e006a",
   },
+  {
+    name: "qrcode-generator",
+    version: "1.4.4",
+    included: true,
+    digest:
+      "sha512:HM7yY8O2ilqhmULxGMpcHSF1EhJJ9yBj8gvDEuZ6M+KGJ0YY2hKpnXvRD+hZPLrDVck3ExIGhmPtSdcjC+guuw==",
+  },
 ] as const;
 
 export interface FileIdentity {
@@ -67,7 +74,7 @@ export interface ReleaseCandidate {
 }
 
 export interface ReleaseDependency {
-  name: "LocalHub" | "Bun" | "llama.cpp" | "Codex" | "SearXNG";
+  name: "LocalHub" | "Bun" | "llama.cpp" | "Codex" | "SearXNG" | "qrcode-generator";
   version: string;
   included: boolean;
   commit?: string;

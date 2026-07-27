@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type ChildProcess, spawn } from "node:child_process";
 import {
@@ -13,6 +13,14 @@ import {
   type ReleaseAssetInspection,
   type VerifiedReleaseCandidate,
 } from "./release.ts";
+import {
+  createMemberBinding,
+  createMemberGatewayHandler,
+  reconcileMemberBinding,
+  renderHostDashboard,
+  type MemberBinding,
+  type PrivateInterface,
+} from "./member-gateway.ts";
 
 export const RUN_STATE_SCHEMA = "localhub.run-state/v1";
 export const DEFAULT_HOST_PORT = 39281;
@@ -70,6 +78,17 @@ export interface LocalHubRunState {
     webUi: false;
     mcpProxy: false;
   };
+  member?: {
+    interface: PrivateInterface;
+    bonjourName: string;
+    port: number;
+    friendlyUrl: string;
+    ipv4Url: string;
+    listener: string;
+    health: "ready" | "closed" | "recheck-required";
+    bonjourPublished: boolean;
+    failure: RunFailure | null;
+  } | null;
   activeWork: number;
   failure: RunFailure | null;
   stop: { activeWork: number; forcedProcesses: string[] } | null;
@@ -100,6 +119,16 @@ export interface SupervisorLaunch {
   cwd: string;
 }
 
+export interface RunMemberConfig {
+  interface: PrivateInterface;
+  bonjourName: string;
+  port: number;
+}
+
+export interface BonjourPublication {
+  stop(): Promise<void>;
+}
+
 export interface ServeRunOptions {
   bundle: RunBundle;
   hostPort: number;
@@ -107,6 +136,11 @@ export interface ServeRunOptions {
   stateDirectory: string;
   startupDeadlineMs: number;
   stopDeadlineMs: number;
+  modelsDirectory?: string;
+  member?: MemberBinding;
+  currentInterfaces?: () => PrivateInterface[];
+  memberCheckIntervalMs?: number;
+  publishBonjour?: (binding: MemberBinding) => Promise<BonjourPublication>;
 }
 
 interface InspectDependencies {
@@ -131,6 +165,8 @@ export interface RunCommandOptions {
   startupDeadlineMs?: number;
   stopDeadlineMs?: number;
   inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+  modelsDirectory?: string;
+  member?: RunMemberConfig;
 }
 
 export class RunCommandError extends Error {
@@ -189,25 +225,45 @@ export function buildSupervisorLaunch(options: {
   llamaPort: number;
   logPath: string;
   stateDirectory: string;
+  modelsDirectory?: string;
+  member?: RunMemberConfig;
 }): SupervisorLaunch {
   assertPort(options.hostPort, "Host control");
   assertPort(options.llamaPort, "llama.cpp");
   if (options.hostPort === options.llamaPort) {
     throw new Error("Host control and llama.cpp must use distinct loopback ports.");
   }
+  const command = [
+    options.executablePath,
+    "__run-agent",
+    "--candidate",
+    options.candidateRecordPath,
+    "--state-dir",
+    options.stateDirectory,
+    "--host-port",
+    String(options.hostPort),
+    "--llama-port",
+    String(options.llamaPort),
+  ];
+  if (options.modelsDirectory) {
+    command.push("--models-dir", options.modelsDirectory);
+  }
+  if (options.member) {
+    command.push(
+      "--member-interface",
+      options.member.interface.name,
+      "--member-address",
+      options.member.interface.address,
+      "--member-netmask",
+      options.member.interface.netmask,
+      "--bonjour-name",
+      options.member.bonjourName,
+      "--member-port",
+      String(options.member.port),
+    );
+  }
   return {
-    command: [
-      options.executablePath,
-      "__run-agent",
-      "--candidate",
-      options.candidateRecordPath,
-      "--state-dir",
-      options.stateDirectory,
-      "--host-port",
-      String(options.hostPort),
-      "--llama-port",
-      String(options.llamaPort),
-    ],
+    command,
     detached: true,
     stdio: ["ignore", options.logPath, options.logPath],
     cwd: options.stateDirectory,
@@ -424,6 +480,8 @@ export async function startLocalHubRun(options: RunCommandOptions): Promise<Loca
     llamaPort,
     logPath,
     stateDirectory: options.stateDirectory,
+    ...(options.modelsDirectory ? { modelsDirectory: options.modelsDirectory } : {}),
+    ...(options.member ? { member: options.member } : {}),
   });
   const logDescriptor = openSync(logPath, "a", 0o600);
   let supervisor: ChildProcess;
@@ -550,7 +608,10 @@ export async function stopLocalHubRun(options: {
     ) {
       if (
         (await listenerResponds(current.host.origin)) ||
-        (await listenerResponds(current.llama.origin))
+        (await listenerResponds(current.llama.origin)) ||
+        (current.member !== undefined &&
+          current.member !== null &&
+          (await listenerResponds(current.member.ipv4Url)))
       ) {
         await Bun.sleep(25);
         continue;
@@ -573,6 +634,53 @@ export async function stopLocalHubRun(options: {
   );
 }
 
+export async function recheckMemberLink(
+  stateDirectory: string,
+): Promise<NonNullable<LocalHubRunState["member"]>> {
+  const inspection = await inspectLocalHubRun(stateDirectory);
+  if (
+    inspection.state !== "running" ||
+    !inspection.identityProven ||
+    !inspection.run ||
+    !inspection.run.member
+  ) {
+    throw new RunCommandError(
+      runFailure(
+        "The exact active LocalHub Run and Member boundary could not be proven.",
+        "No listener was opened, closed, or rebound.",
+        "The loopback Host status remains available.",
+        "Restore the exact Run identity before requesting a Member recheck.",
+        "Run `lh run status`, then `lh member recheck`.",
+      ),
+    );
+  }
+  const response = await finiteFetch(
+    fetch,
+    `${inspection.run.host.origin}/member/recheck`,
+    {
+      method: "POST",
+      headers: { "x-localhub-run-id": inspection.run.runId },
+    },
+    5_000,
+  );
+  if (!response.ok) {
+    throw new RunCommandError(
+      runFailure(
+        `Member recheck failed with HTTP ${response.status}.`,
+        "The old Member Link remains closed and no alternate interface was selected.",
+        "The exact Run and loopback Host dashboard remain available.",
+        "Confirm the intended private interface and resolve the reported network cause.",
+        "Run `lh member recheck` again.",
+      ),
+    );
+  }
+  const body = (await response.json()) as { member?: LocalHubRunState["member"] };
+  if (body.member?.health !== "ready") {
+    throw new Error("Member recheck returned no verified ready boundary.");
+  }
+  return body.member;
+}
+
 export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> {
   assertPort(options.hostPort, "Host control");
   assertPort(options.llamaPort, "llama.cpp");
@@ -581,7 +689,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
   }
   await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
   await chmod(options.stateDirectory, 0o700);
-  const modelsDirectory = join(options.stateDirectory, "empty-models");
+  const modelsDirectory = options.modelsDirectory ?? join(options.stateDirectory, "empty-models");
   await mkdir(modelsDirectory, { recursive: true, mode: 0o700 });
   const logPath = join(options.stateDirectory, "llama-server.log");
   const runId = randomUUID();
@@ -626,6 +734,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       webUi: false,
       mcpProxy: false,
     },
+    member: options.member ? memberState(options.member, "ready", false, null) : null,
     activeWork: 0,
     failure: null,
     stop: null,
@@ -635,6 +744,11 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
 
   let llama: ChildProcess | null = null;
   let host: ReturnType<typeof Bun.serve> | null = null;
+  let member: ReturnType<typeof Bun.serve> | null = null;
+  let memberBinding = options.member ?? null;
+  let bonjour: BonjourPublication | null = null;
+  let memberMonitor: ReturnType<typeof setInterval> | null = null;
+  let memberWithdrawn = false;
   let stopping = false;
   let lifecycleResolve!: () => void;
   const lifecycle = new Promise<void>((resolve) => {
@@ -673,6 +787,18 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     if (crashTask) await crashTask;
     const forcedProcesses: string[] = [];
     await setState({ ...state, status: "stopping", acceptingWork: false, activeWork: 0 });
+    if (memberMonitor) {
+      clearInterval(memberMonitor);
+      memberMonitor = null;
+    }
+    if (member) {
+      await member.stop(true);
+      member = null;
+    }
+    if (bonjour) {
+      await bonjour.stop();
+      bonjour = null;
+    }
     if (llama && llama.exitCode === null && llama.signalCode === null) {
       llama.kill("SIGTERM");
       if (!(await waitForExit(llama, options.stopDeadlineMs))) {
@@ -693,6 +819,7 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       acceptingWork: false,
       host: { ...state.host, health: "closed" },
       llama: { ...state.llama, health: "closed" },
+      member: state.member ? { ...state.member, health: "closed", bonjourPublished: false } : null,
       stop: { activeWork: 0, forcedProcesses },
     });
     lifecycleResolve();
@@ -788,16 +915,121 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
       await verifyListenerOwner(options.llamaPort, llama.pid);
     }
 
+    const startMemberService = async (binding: MemberBinding): Promise<void> => {
+      const reconciliation = reconcileMemberBinding(
+        binding,
+        (options.currentInterfaces ?? currentPrivateInterfaces)(),
+      );
+      if (reconciliation.status === "withdrawn") throw new Error(reconciliation.failure.cause);
+      let server: ReturnType<typeof Bun.serve> | null = null;
+      const handler = createMemberGatewayHandler(binding, (request) => {
+        const address = server?.requestIP(request)?.address;
+        return address ?? null;
+      });
+      server = Bun.serve({
+        hostname: binding.interface.address,
+        port: binding.port,
+        fetch: handler,
+      });
+      try {
+        bonjour = await (options.publishBonjour ?? publishBonjourService)(binding);
+      } catch (error) {
+        await server.stop(true);
+        throw error;
+      }
+      member = server;
+      memberBinding = binding;
+      memberWithdrawn = false;
+      await setState({
+        ...state,
+        member: memberState(binding, "ready", true, null),
+      });
+    };
+
+    const withdrawMember = async (failure: RunFailure): Promise<void> => {
+      if (memberWithdrawn) return;
+      memberWithdrawn = true;
+      if (member) {
+        await member.stop(true);
+        member = null;
+      }
+      if (bonjour) {
+        await bonjour.stop();
+        bonjour = null;
+      }
+      if (state.member) {
+        await setState({
+          ...state,
+          member: {
+            ...state.member,
+            health: "recheck-required",
+            bonjourPublished: false,
+            failure,
+          },
+        });
+      }
+    };
+
     host = Bun.serve({
       hostname: "127.0.0.1",
       port: options.hostPort,
-      fetch(request) {
+      async fetch(request) {
         const url = new URL(request.url);
+        if (request.method === "GET" && url.pathname === "/") {
+          return new Response(
+            renderHostDashboard(state.member?.health === "ready" ? memberBinding : null, state),
+            {
+              headers: {
+                "cache-control": "no-store",
+                "content-security-policy":
+                  "default-src 'self'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+                "content-type": "text/html; charset=utf-8",
+                "x-content-type-options": "nosniff",
+                "x-frame-options": "DENY",
+              },
+            },
+          );
+        }
         if (request.method === "GET" && url.pathname === "/health") {
           return Response.json(state);
         }
-        if (request.method === "POST" && url.pathname === "/stop") {
+        if (request.method === "POST" && url.pathname === "/member/recheck") {
           if (request.headers.get("x-localhub-run-id") !== state.runId) {
+            return Response.json(
+              { error: "LocalHub Run identity did not match." },
+              { status: 409 },
+            );
+          }
+          if (!options.member || state.member?.health !== "recheck-required") {
+            return Response.json({ error: "Member recheck is not required." }, { status: 409 });
+          }
+          const replacement = (options.currentInterfaces ?? currentPrivateInterfaces)().find(
+            (item) => item.name === options.member?.interface.name,
+          );
+          if (!replacement) {
+            return Response.json(
+              { error: "Selected private interface remains unavailable." },
+              { status: 503 },
+            );
+          }
+          try {
+            const rebound = await createMemberBinding({
+              selected: replacement,
+              available: (options.currentInterfaces ?? currentPrivateInterfaces)(),
+              bonjourName: options.member.bonjourName,
+              port: options.member.port,
+            });
+            await startMemberService(rebound);
+            return Response.json({ status: "ready", member: state.member });
+          } catch (error) {
+            return Response.json({ error: errorMessage(error) }, { status: 503 });
+          }
+        }
+        if (request.method === "POST" && url.pathname === "/stop") {
+          if (
+            request.headers.get("x-localhub-run-id") !== state.runId &&
+            url.searchParams.get("run-id") !== state.runId
+          ) {
             return Response.json(
               { error: "LocalHub Run identity did not match." },
               { status: 409 },
@@ -812,6 +1044,24 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     });
     if (process.platform === "darwin") {
       await verifyListenerOwner(options.hostPort, process.pid);
+    }
+    if (memberBinding) {
+      await startMemberService(memberBinding);
+      const intervalMs = options.memberCheckIntervalMs ?? 1_000;
+      memberMonitor = setInterval(() => {
+        if (!memberBinding || memberWithdrawn || stopping) return;
+        const reconciliation = reconcileMemberBinding(
+          memberBinding,
+          (options.currentInterfaces ?? currentPrivateInterfaces)(),
+        );
+        if (reconciliation.status === "withdrawn") {
+          void withdrawMember(reconciliation.failure).catch((error) => {
+            crashRecordError = error instanceof Error ? error : new Error(String(error));
+            lifecycleResolve();
+          });
+        }
+      }, intervalMs);
+      memberMonitor.unref();
     }
     await setState({
       ...state,
@@ -843,6 +1093,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         await host.stop(true);
         host = null;
       }
+      if (memberMonitor) clearInterval(memberMonitor);
+      await stopOptionalServer(member);
+      await stopOptionalBonjour(bonjour);
       const failure = runFailure(
         `LocalHub Run stop failed: ${errorMessage(error)}`,
         "New work is rejected and no substitute process, runtime, model, or profile was started.",
@@ -856,6 +1109,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         acceptingWork: false,
         host: { ...state.host, health: "closed" },
         llama: { ...state.llama, health: "failed" },
+        member: state.member
+          ? { ...state.member, health: "closed", bonjourPublished: false }
+          : null,
         failure,
       });
     } else {
@@ -871,6 +1127,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         await host.stop(true);
         host = null;
       }
+      if (memberMonitor) clearInterval(memberMonitor);
+      await stopOptionalServer(member);
+      await stopOptionalBonjour(bonjour);
       const failure = runFailure(
         `LocalHub Run start failed: ${errorMessage(error)}`,
         "No model or Run Profile was loaded; no alternate runtime was tried; LM Studio, models, configuration, and source files remain untouched.",
@@ -884,6 +1143,9 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         acceptingWork: false,
         host: { ...state.host, health: "failed" },
         llama: { ...state.llama, health: "failed" },
+        member: state.member
+          ? { ...state.member, health: "closed", bonjourPublished: false }
+          : null,
         failure,
       });
     }
@@ -951,12 +1213,47 @@ function validateRunState(value: unknown): asserts value is LocalHubRunState {
     llama.builtInAgent !== false ||
     llama.webUi !== false ||
     llama.mcpProxy !== false ||
+    !validMemberState(value.member) ||
     !nonnegativeInteger(value.activeWork) ||
     !validFailure(value.failure) ||
     !validStop(value.stop) ||
     !nonempty(value.updatedAt)
   ) {
     throw new Error("run state is incomplete, unsafe, or malformed");
+  }
+}
+
+function validMemberState(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value) || !isRecord(value.interface)) return false;
+  const selected = value.interface;
+  if (
+    !nonempty(selected.name) ||
+    !nonempty(selected.address) ||
+    !nonempty(selected.netmask) ||
+    !nonempty(value.bonjourName) ||
+    !nonnegativeInteger(value.port) ||
+    !nonempty(value.friendlyUrl) ||
+    !nonempty(value.ipv4Url) ||
+    !nonempty(value.listener) ||
+    !["ready", "closed", "recheck-required"].includes(String(value.health)) ||
+    typeof value.bonjourPublished !== "boolean" ||
+    !validFailure(value.failure)
+  ) {
+    return false;
+  }
+  try {
+    const friendly = new URL(value.friendlyUrl);
+    const ipv4 = new URL(value.ipv4Url);
+    return (
+      friendly.protocol === "http:" &&
+      friendly.hostname === value.bonjourName &&
+      ipv4.protocol === "http:" &&
+      ipv4.hostname === selected.address &&
+      ipv4.host === value.listener
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -1031,6 +1328,86 @@ export async function writeRunState(
   await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, finalPath);
+}
+
+function memberState(
+  binding: MemberBinding,
+  health: "ready" | "closed" | "recheck-required",
+  bonjourPublished: boolean,
+  failure: RunFailure | null,
+): NonNullable<LocalHubRunState["member"]> {
+  return {
+    interface: { ...binding.interface },
+    bonjourName: binding.bonjourName,
+    port: binding.port,
+    friendlyUrl: binding.friendlyUrl,
+    ipv4Url: binding.ipv4Url,
+    listener: new URL(binding.ipv4Url).host,
+    health,
+    bonjourPublished,
+    failure,
+  };
+}
+
+export function currentPrivateInterfaces(): PrivateInterface[] {
+  const result: PrivateInterface[] = [];
+  for (const [name, entries] of Object.entries(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family === "IPv4" && !entry.internal) {
+        result.push({ name, address: entry.address, netmask: entry.netmask });
+      }
+    }
+  }
+  return result;
+}
+
+export async function publishBonjourService(binding: MemberBinding): Promise<BonjourPublication> {
+  if (process.platform !== "darwin") {
+    throw new Error("Bonjour publication is available only on the supported macOS Host.");
+  }
+  const child = spawn(
+    "/usr/bin/dns-sd",
+    ["-R", "LocalHub", "_http._tcp", "local.", String(binding.port)],
+    { stdio: "ignore" },
+  );
+  await new Promise<void>((resolve, reject) => {
+    const onSpawn = (): void => {
+      child.off("error", onError);
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      child.off("spawn", onSpawn);
+      reject(error);
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+  });
+  await Bun.sleep(100);
+  if (child.exitCode !== null || child.signalCode !== null) {
+    throw new Error("Bonjour publication exited before the Member Link was ready.");
+  }
+  let stopped = false;
+  return {
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        if (!(await waitForExit(child, 1_000))) {
+          child.kill("SIGKILL");
+          await waitForExit(child, 1_000);
+        }
+      }
+    },
+  };
+}
+
+async function stopOptionalServer(server: ReturnType<typeof Bun.serve> | null): Promise<void> {
+  if (server) await server.stop(true);
+}
+
+async function stopOptionalBonjour(publication: BonjourPublication | null): Promise<void> {
+  if (publication) await publication.stop();
 }
 
 function exactLlamaEnvironment(

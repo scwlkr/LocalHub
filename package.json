@@ -23,7 +23,8 @@
     "candidate:lifecycle": "bun run scripts/run-lifecycle-smoke.ts"
   },
   "dependencies": {
-    "@opentui/core": "0.4.5"
+    "@opentui/core": "0.4.5",
+    "qrcode-generator": "1.4.4"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
