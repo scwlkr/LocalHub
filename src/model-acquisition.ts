@@ -2,15 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import {
   chmod,
+  type FileHandle,
   lstat,
   mkdir,
   open,
   readFile,
+  realpath,
   rename,
+  rm,
   stat,
   statfs,
   writeFile,
-  type FileHandle,
 } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -37,6 +39,7 @@ export interface ModelImportDependencies {
   copyChunkBytes?: number;
   afterCopyChunk?: (copiedBytes: number) => Promise<void> | void;
   renamePath?: (oldPath: string, newPath: string) => Promise<void>;
+  beforeCatalogCommit?: () => Promise<void> | void;
 }
 
 interface SourceIdentity {
@@ -59,7 +62,7 @@ export interface PlannedModelFile {
 
 export interface ModelAcquisition {
   id: string;
-  status: "planned" | "incomplete" | "failed" | "installed";
+  status: "planned" | "incomplete" | "failed" | "installed" | "discarded";
   displayName: string;
   storagePath: string;
   requiredBytes: number;
@@ -173,6 +176,7 @@ export async function prepareLocalModel(
 
   const files: PlannedModelFile[] = [];
   const selectedPaths = new Set<string>();
+  const canonicalStoragePath = await realpath(storagePath);
   for (const selected of options.files) {
     const sourcePath = resolve(selected.path);
     if (selectedPaths.has(sourcePath))
@@ -182,10 +186,13 @@ export async function prepareLocalModel(
       throw new Error(`Selected local file is not GGUF: ${sourcePath}`);
     }
     const source = await readableRegularFile(sourcePath);
-    const insideStorage = pathInside(storagePath, sourcePath);
+    const canonicalSourcePath = await realpath(sourcePath);
+    const insideStorage = pathInside(canonicalStoragePath, canonicalSourcePath);
     if (
       insideStorage &&
-      MANAGED_DIRECTORIES.has(relative(storagePath, sourcePath).split("/")[0] ?? "")
+      MANAGED_DIRECTORIES.has(
+        relative(canonicalStoragePath, canonicalSourcePath).split(/[\\/]/)[0] ?? "",
+      )
     ) {
       throw new Error(`Select a source outside LocalHub's managed Model Storage directories.`);
     }
@@ -279,6 +286,8 @@ export async function importLocalModel(
     throw new Error(`Model Acquisition staging path is not a safe folder: ${acquisition.id}`);
   }
   acquisition.failure = null;
+  let promotedDirectory: string | null = null;
+  let pendingInstalledId: string | null = null;
   try {
     const verifiable: Array<{ selected: PlannedModelFile; path: string; managed: boolean }> = [];
     for (const selected of acquisition.files) {
@@ -359,6 +368,7 @@ export async function importLocalModel(
     if (duplicate) {
       acquisition.status = "installed";
       acquisition.installedModelId = duplicate.id;
+      await rm(stagingPath, { recursive: true, force: true });
       await writeModelState(storagePath, state);
       return duplicate;
     }
@@ -366,6 +376,7 @@ export async function importLocalModel(
     const finalDirectory = join(storagePath, ".localhub-models", id);
     if (orderedFiles.some((file) => file.managed)) {
       await (dependencies.renamePath ?? rename)(stagingPath, finalDirectory);
+      promotedDirectory = finalDirectory;
     }
     const installedFiles = orderedFiles.map<InstalledModelFile>((file) => ({
       fileName: file.fileName,
@@ -394,11 +405,28 @@ export async function importLocalModel(
       acquiredAt: new Date().toISOString(),
     };
     state.installedModels.push(installed);
+    pendingInstalledId = installed.id;
     acquisition.status = "installed";
     acquisition.installedModelId = installed.id;
+    await dependencies.beforeCatalogCommit?.();
     await writeModelState(storagePath, state);
     return installed;
   } catch (error) {
+    if (pendingInstalledId) {
+      state.installedModels = state.installedModels.filter(
+        (model) => model.id !== pendingInstalledId,
+      );
+      acquisition.installedModelId = null;
+    }
+    if (promotedDirectory) {
+      try {
+        await rename(promotedDirectory, stagingPath);
+      } catch (rollbackError) {
+        throw new Error(
+          `${errorMessage(error)} Atomic promotion rollback failed: ${errorMessage(rollbackError)}`,
+        );
+      }
+    }
     acquisition.status = error instanceof LocalCopyInterruptedError ? "incomplete" : "failed";
     acquisition.failure = errorMessage(error);
     await writeModelState(storagePath, state);
@@ -410,6 +438,53 @@ export async function inspectModelAcquisitions(
   storagePathValue: string,
 ): Promise<ModelAcquisition[]> {
   return (await readModelState(resolve(storagePathValue))).acquisitions;
+}
+
+export async function renameInstalledModel(
+  storagePathValue: string,
+  modelId: string,
+  displayNameValue: string,
+): Promise<InstalledModel> {
+  const storagePath = resolve(storagePathValue);
+  const displayName = displayNameValue.trim();
+  if (!displayName) throw new Error("Installed Model display name must not be empty.");
+  const state = await readModelState(storagePath);
+  const model = state.installedModels.find((item) => item.id === modelId);
+  if (!model) throw new Error(`Unknown Installed Model content identity: ${modelId}`);
+  const foldedName = displayName.toLocaleLowerCase("en-US");
+  if (
+    state.installedModels.some(
+      (item) => item.id !== modelId && item.displayName.toLocaleLowerCase("en-US") === foldedName,
+    )
+  ) {
+    throw new Error(`Installed Model display name is already in use: ${displayName}`);
+  }
+  model.displayName = displayName;
+  await writeModelState(storagePath, state);
+  return { ...model, available: await installedFilesPresent(model.files) };
+}
+
+export async function discardModelAcquisition(
+  storagePathValue: string,
+  acquisitionId: string,
+): Promise<ModelAcquisition> {
+  const storagePath = resolve(storagePathValue);
+  const state = await readModelState(storagePath);
+  const acquisition = state.acquisitions.find((item) => item.id === acquisitionId);
+  if (!acquisition) throw new Error(`Unknown Model Acquisition: ${acquisitionId}`);
+  if (acquisition.status === "installed") {
+    throw new Error(`Installed Model Acquisition ${acquisitionId} cannot be discarded.`);
+  }
+  if (acquisition.status === "discarded") return acquisition;
+  await rm(join(storagePath, ".localhub-staging", acquisition.id), {
+    recursive: true,
+    force: true,
+  });
+  acquisition.status = "discarded";
+  acquisition.failure = null;
+  for (const file of acquisition.files) file.receivedBytes = 0;
+  await writeModelState(storagePath, state);
+  return acquisition;
 }
 
 export async function inspectInstalledModels(storagePathValue: string): Promise<InstalledModel[]> {
@@ -449,8 +524,12 @@ async function readableRegularFile(
   if (entry.isSymbolicLink() || !entry.isFile()) {
     throw new Error(`Selected local GGUF is not a readable regular file: ${path}`);
   }
-  const handle = await open(path, "r");
-  await handle.close();
+  try {
+    const handle = await open(path, "r");
+    await handle.close();
+  } catch (error) {
+    throw new Error(`Selected local GGUF is unreadable: ${path}. ${errorMessage(error)}`);
+  }
   const size = safeNumber(entry.size, `Selected local GGUF is too large: ${path}`);
   return {
     size,

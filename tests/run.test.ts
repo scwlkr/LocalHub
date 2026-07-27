@@ -1,30 +1,30 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { EventEmitter } from "node:events";
-import type { ChildProcess } from "node:child_process";
-import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { main } from "../src/cli.ts";
-import {
-  RUN_STATE_SCHEMA,
-  buildLlamaLaunch,
-  buildSupervisorLaunch,
-  currentPrivateInterfaces,
-  inspectLocalHubRun,
-  publishBonjourService,
-  readRunState,
-  serveLocalHubRun,
-  startLocalHubRun,
-  stopLocalHubRun,
-  writeRunState,
-  type LocalHubRunState,
-  type RunBundle,
-} from "../src/run.ts";
 import {
   createMemberBinding,
   isPeerOnSelectedSubnet,
   type MemberBinding,
   type PrivateInterface,
 } from "../src/member-gateway.ts";
+import {
+  buildLlamaLaunch,
+  buildSupervisorLaunch,
+  currentPrivateInterfaces,
+  inspectLocalHubRun,
+  type LocalHubRunState,
+  publishBonjourService,
+  RUN_STATE_SCHEMA,
+  type RunBundle,
+  readRunState,
+  serveLocalHubRun,
+  startLocalHubRun,
+  stopLocalHubRun,
+  writeRunState,
+} from "../src/run.ts";
 
 const testRoots: string[] = [];
 const macOSProcessTest = process.platform === "darwin" ? test : test.skip;
@@ -150,10 +150,13 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
     main(["run", "start"], {
       buildCommit: "a".repeat(40),
       executablePath: "/candidate/lh",
+      modelStoragePath: "/models",
       runCandidateRecordPath: "/candidate/release-candidate.json",
       runStateDirectory: "/state",
       startRun: async (options) => {
-        calls.push(`start:${options.candidateRecordPath}:${options.stateDirectory}`);
+        calls.push(
+          `start:${options.candidateRecordPath}:${options.stateDirectory}:${options.modelsDirectory}`,
+        );
         return state;
       },
     }),
@@ -182,7 +185,7 @@ test("the shipped CLI exposes explicit start/status/stop without replacing legac
   expect(start.code).toBe(0);
   expect(status.code).toBe(0);
   expect(stop.code).toBe(0);
-  expect(calls).toEqual(["start:/candidate/release-candidate.json:/state", "stop"]);
+  expect(calls).toEqual(["start:/candidate/release-candidate.json:/state:/models", "stop"]);
   expect(start.output.join("\n")).toContain('"model": null');
   expect(status.output.join("\n")).toContain('"listener": "127.0.0.1:39282"');
 });
@@ -529,6 +532,24 @@ macOSProcessTest(
       bundle: bundle(fakeLlama),
       hostPort,
       llamaPort,
+      modelsDirectory: join(root, "model-storage"),
+      inspectModels: async (path) => {
+        expect(path).toBe(join(root, "model-storage"));
+        return [
+          {
+            id: "a".repeat(64),
+            displayName: "Exact Model",
+            available: true,
+            architecture: "qwen2",
+            parameterCount: 1,
+            quantization: { fileType: 1, tensorTypes: { F32: 1 } },
+            trainingContext: 2048,
+            templateHints: [],
+            files: [],
+            acquiredAt: "2026-07-27T00:00:00.000Z",
+          },
+        ];
+      },
       stateDirectory,
       startupDeadlineMs: 20_000,
       stopDeadlineMs: 2_000,
@@ -553,6 +574,11 @@ macOSProcessTest(
       },
     });
     expect(running.llama.devices).toEqual(["Metal: Apple test GPU"]);
+    expect(
+      await fetch(`http://127.0.0.1:${hostPort}/models`).then((response) => response.json()),
+    ).toMatchObject({
+      installedModels: [{ id: "a".repeat(64), displayName: "Exact Model", architecture: "qwen2" }],
+    });
 
     const stop = await fetch(`http://127.0.0.1:${hostPort}/stop`, {
       method: "POST",

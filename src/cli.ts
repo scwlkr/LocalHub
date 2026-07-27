@@ -1,38 +1,50 @@
 #!/usr/bin/env bun
 
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { buildCodexProcess, runCodex } from "./codex.ts";
 import { ConfigError, configPath, loadConfig, saveConfig } from "./config.ts";
 import { diagnose } from "./diagnostics.ts";
 import { validateEvidenceRecord } from "./evidence.ts";
-import { runGuidedFirstRun } from "./guided-runway.ts";
+import { readFirstRunState } from "./first-run.ts";
 import {
   createNativeGuidedDependencies,
   defaultFirstRunStatePath,
   defaultModelStoragePath,
 } from "./guided-native.ts";
-import { renderDoctor, renderStatus } from "./presentation.ts";
-import { THIRD_PARTY_NOTICES } from "./notices.ts";
-import { verifyReleaseCandidate, type ReleaseAssetInspection } from "./release.ts";
+import { runGuidedFirstRun } from "./guided-runway.ts";
+import { createMemberBinding } from "./member-gateway.ts";
 import {
-  RunCommandError,
-  defaultRunStateDirectory,
+  discardModelAcquisition,
+  importLocalModel,
+  inspectInstalledModels,
+  inspectModelAcquisitions,
+  type LocalModelSelection,
+  prepareLocalModel,
+  renameInstalledModel,
+} from "./model-acquisition.ts";
+import { THIRD_PARTY_NOTICES } from "./notices.ts";
+import { renderDoctor, renderStatus } from "./presentation.ts";
+import { type ReleaseAssetInspection, verifyReleaseCandidate } from "./release.ts";
+import {
   currentPrivateInterfaces,
+  defaultRunStateDirectory,
   inspectLocalHubRun,
+  type LocalHubRunState,
+  RunCommandError,
+  type RunInspection,
   recheckMemberLink,
   runBundleFromCandidate,
   serveLocalHubRun,
   startLocalHubRun,
   stopLocalHubRun,
-  type LocalHubRunState,
-  type RunInspection,
 } from "./run.ts";
-import { createMemberBinding } from "./member-gateway.ts";
 import { collectRuntime } from "./runtime.ts";
 import { readHiddenInput, runSetup, type SetupResult } from "./setup.ts";
 import { runTui } from "./tui.ts";
 import type { LocalHubConfig } from "./types.ts";
+
 export { VERSION } from "./version.ts";
+
 import { BUILD_COMMIT, VERSION } from "./version.ts";
 
 const HELP = `LocalHub ${VERSION}
@@ -47,6 +59,18 @@ Usage:
   lh run status      Show exact supervisor, runtime, listeners, and health
   lh stop            Reject new work and stop only LocalHub-owned processes
   lh member recheck  Explicitly verify and republish after network change/wake
+  lh model prepare --name <label> --file <path> [--file <shard> ...]
+                   [--companion <path>] [--sha256 <path>=<digest> ...]
+                     Freeze exact local files and space without transferring bytes
+  lh model import <acquisition-id>
+                     Explicitly copy/adopt, verify, and atomically install one plan
+  lh model list      Inspect content-identified Installed Models
+  lh model acquisitions
+                     Inspect planned, incomplete, failed, and completed acquisitions
+  lh model rename <content-id> <label>
+                     Change only an Installed Model display name
+  lh model discard <acquisition-id>
+                     Discard only non-installed staged acquisition bytes
   lh release identity <release-candidate.json>
                      Verify and print the exact assembled candidate identity
   lh release notices  Print bundled third-party license notices
@@ -94,6 +118,7 @@ export interface CliDependencies {
   firstRunStatePath?: string;
   runFirstRun?: (options: FirstRunCommandOptions) => Promise<"ready" | "cancelled">;
   recheckMember?: typeof recheckMemberLink;
+  modelStoragePath?: string;
 }
 
 export interface FirstRunCommandOptions {
@@ -178,6 +203,34 @@ export async function main(
   const executablePath = dependencies.executablePath ?? process.execPath;
   const candidateRecordPath =
     dependencies.runCandidateRecordPath ?? join(dirname(executablePath), "release-candidate.json");
+  const modelCommand = parseModelCommand(args);
+  if (modelCommand === "invalid") {
+    console.error("Invalid model command. Run `lh --help`.");
+    return 2;
+  }
+  if (modelCommand) {
+    try {
+      const storagePath =
+        dependencies.modelStoragePath ??
+        (await configuredModelStorage({
+          buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+          candidateRecordPath,
+          executablePath,
+          firstRunStatePath:
+            dependencies.firstRunStatePath ??
+            defaultFirstRunStatePath(dependencies.env ?? process.env),
+          ...(dependencies.inspectReleaseAsset
+            ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+            : {}),
+        }));
+      const result = await runModelCommand(storagePath, modelCommand);
+      console.log(JSON.stringify(result, null, 2));
+      return 0;
+    } catch (error) {
+      console.error(`Model command failed: ${errorMessage(error)}`);
+      return 1;
+    }
+  }
   const assembledDefault = args.length === 0 && (await Bun.file(candidateRecordPath).exists());
   if (assembledDefault || (args.length === 1 && args[0] === "first-run")) {
     const interactive =
@@ -239,6 +292,23 @@ export async function main(
       return inspection.state === "failed" ? 1 : 0;
     }
     try {
+      const modelsDirectory =
+        runCommand === "start"
+          ? (dependencies.modelStoragePath ??
+            (dependencies.startRun
+              ? undefined
+              : await configuredModelStorageIfPresent({
+                  buildCommit: dependencies.buildCommit ?? BUILD_COMMIT,
+                  candidateRecordPath,
+                  executablePath,
+                  firstRunStatePath:
+                    dependencies.firstRunStatePath ??
+                    defaultFirstRunStatePath(dependencies.env ?? process.env),
+                  ...(dependencies.inspectReleaseAsset
+                    ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
+                    : {}),
+                })))
+          : undefined;
       const state =
         runCommand === "start"
           ? await (dependencies.startRun ?? startLocalHubRun)({
@@ -246,6 +316,7 @@ export async function main(
               candidateRecordPath,
               executablePath,
               stateDirectory,
+              ...(modelsDirectory ? { modelsDirectory } : {}),
               ...(dependencies.inspectReleaseAsset
                 ? { inspectReleaseAsset: dependencies.inspectReleaseAsset }
                 : {}),
@@ -502,6 +573,133 @@ function parseRunCommand(args: string[]): "start" | "status" | "stop" | null {
     }
   }
   return null;
+}
+
+type ModelCommand =
+  | { kind: "prepare"; displayName: string; files: LocalModelSelection[] }
+  | { kind: "import"; acquisitionId: string }
+  | { kind: "list" }
+  | { kind: "acquisitions" }
+  | { kind: "rename"; modelId: string; displayName: string }
+  | { kind: "discard"; acquisitionId: string };
+
+function parseModelCommand(args: string[]): ModelCommand | "invalid" | null {
+  if (args[0] !== "model") return null;
+  if (args.length === 2 && args[1] === "list") return { kind: "list" };
+  if (args.length === 2 && args[1] === "acquisitions") return { kind: "acquisitions" };
+  if (args.length === 3 && args[1] === "import") {
+    return { kind: "import", acquisitionId: args[2] ?? "" };
+  }
+  if (args.length === 3 && args[1] === "discard") {
+    return { kind: "discard", acquisitionId: args[2] ?? "" };
+  }
+  if (args.length === 4 && args[1] === "rename") {
+    return { kind: "rename", modelId: args[2] ?? "", displayName: args[3] ?? "" };
+  }
+  if (args[1] !== "prepare") return "invalid";
+  let displayName: string | null = null;
+  const modelPaths: string[] = [];
+  let companionPath: string | null = null;
+  const publishedDigests = new Map<string, string>();
+  for (let index = 2; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if (!option || value === undefined) return "invalid";
+    if (option === "--name" && displayName === null) displayName = value;
+    else if (option === "--file") modelPaths.push(value);
+    else if (option === "--companion" && companionPath === null) companionPath = value;
+    else if (option === "--sha256") {
+      const separator = value.lastIndexOf("=");
+      if (separator <= 0) return "invalid";
+      const path = resolve(value.slice(0, separator));
+      const digest = value.slice(separator + 1).toLowerCase();
+      if (publishedDigests.has(path) || !/^[0-9a-f]{64}$/.test(digest)) return "invalid";
+      publishedDigests.set(path, digest);
+    } else return "invalid";
+  }
+  if (!displayName || modelPaths.length === 0) return "invalid";
+  const selections: LocalModelSelection[] = modelPaths.map((path) =>
+    localModelSelection(path, "model", publishedDigests),
+  );
+  if (companionPath) {
+    selections.push(localModelSelection(companionPath, "companion", publishedDigests));
+  }
+  const selected = new Set(selections.map((file) => resolve(file.path)));
+  if ([...publishedDigests.keys()].some((path) => !selected.has(path))) return "invalid";
+  return { kind: "prepare", displayName, files: selections };
+}
+
+function localModelSelection(
+  path: string,
+  role: LocalModelSelection["role"],
+  publishedDigests: Map<string, string>,
+): LocalModelSelection {
+  const publishedSha256 = publishedDigests.get(resolve(path));
+  return publishedSha256 ? { path, role, publishedSha256 } : { path, role };
+}
+
+async function runModelCommand(storagePath: string, command: ModelCommand): Promise<unknown> {
+  switch (command.kind) {
+    case "prepare":
+      return await prepareLocalModel({
+        displayName: command.displayName,
+        files: command.files,
+        storagePath,
+      });
+    case "import":
+      return await importLocalModel(storagePath, command.acquisitionId);
+    case "list":
+      return await inspectInstalledModels(storagePath);
+    case "acquisitions":
+      return await inspectModelAcquisitions(storagePath);
+    case "rename":
+      return await renameInstalledModel(storagePath, command.modelId, command.displayName);
+    case "discard":
+      return await discardModelAcquisition(storagePath, command.acquisitionId);
+  }
+}
+
+async function configuredModelStorage(options: {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  firstRunStatePath: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+}): Promise<string> {
+  const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+      ...(options.inspectReleaseAsset ? { inspectAsset: options.inspectReleaseAsset } : {}),
+    },
+  );
+  const firstRun = await readFirstRunState(options.firstRunStatePath, candidate);
+  if (!firstRun?.choices.modelStorage) {
+    throw new Error(
+      "Guided First Run has not confirmed Model Storage for this exact candidate. Run `lh first-run`.",
+    );
+  }
+  return firstRun.choices.modelStorage.path;
+}
+
+async function configuredModelStorageIfPresent(options: {
+  buildCommit: string;
+  candidateRecordPath: string;
+  executablePath: string;
+  firstRunStatePath: string;
+  inspectReleaseAsset?: (path: string) => Promise<ReleaseAssetInspection>;
+}): Promise<string | undefined> {
+  const candidate = await verifyReleaseCandidate(
+    options.candidateRecordPath,
+    options.executablePath,
+    {
+      buildCommit: options.buildCommit,
+      ...(options.inspectReleaseAsset ? { inspectAsset: options.inspectReleaseAsset } : {}),
+    },
+  );
+  const firstRun = await readFirstRunState(options.firstRunStatePath, candidate);
+  return firstRun?.choices.modelStorage?.path;
 }
 
 function parseSupervisorArgs(args: string[]): {

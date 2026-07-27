@@ -1,28 +1,29 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type ChildProcess, spawn } from "node:child_process";
-import {
-  LLAMA_CPP_ARCHIVE_SHA256,
-  LLAMA_CPP_BUILD,
-  LLAMA_CPP_COMMIT,
-  verifyReleaseCandidate,
-  type FileIdentity,
-  type ReleaseAssetInspection,
-  type VerifiedReleaseCandidate,
-} from "./release.ts";
 import {
   createMemberBinding,
   createMemberGatewayHandler,
   isEligibleLanInterface,
+  type MemberBinding,
+  type PrivateInterface,
   reconcileMemberBinding,
   renderHostDashboard,
   renderStylesheet,
-  type MemberBinding,
-  type PrivateInterface,
 } from "./member-gateway.ts";
+import { type InstalledModel, inspectInstalledModels } from "./model-acquisition.ts";
+import {
+  type FileIdentity,
+  LLAMA_CPP_ARCHIVE_SHA256,
+  LLAMA_CPP_BUILD,
+  LLAMA_CPP_COMMIT,
+  type ReleaseAssetInspection,
+  type VerifiedReleaseCandidate,
+  verifyReleaseCandidate,
+} from "./release.ts";
 
 export const RUN_STATE_SCHEMA = "localhub.run-state/v1";
 export const DEFAULT_HOST_PORT = 39281;
@@ -154,6 +155,7 @@ export interface ServeRunOptions {
   memberPeerAddress?: (request: Request) => string | null;
   beforeMemberVisit?: (route: "friendly" | "ipv4") => Promise<void>;
   publishBonjour?: (binding: MemberBinding) => Promise<BonjourPublication>;
+  inspectModels?: (modelsDirectory: string) => Promise<InstalledModel[]>;
 }
 
 interface InspectDependencies {
@@ -804,7 +806,11 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
     ...launch.command
       .slice(1)
       .map((argument) =>
-        argument === modelsDirectory ? "$LOCALHUB_STATE/empty-models" : argument,
+        argument === modelsDirectory
+          ? options.modelsDirectory
+            ? "$MODEL_STORAGE"
+            : "$LOCALHUB_STATE/empty-models"
+          : argument,
       ),
   ];
   let state: LocalHubRunState = {
@@ -1200,6 +1206,22 @@ export async function serveLocalHubRun(options: ServeRunOptions): Promise<void> 
         }
         if (request.method === "GET" && url.pathname === "/health") {
           return Response.json(state);
+        }
+        if (request.method === "GET" && url.pathname === "/models") {
+          try {
+            return Response.json({
+              installedModels: await (options.inspectModels ?? inspectInstalledModels)(
+                modelsDirectory,
+              ),
+            });
+          } catch (error) {
+            return Response.json(
+              {
+                error: `Installed Model inventory unavailable: ${errorMessage(error)}. No substitute inventory was used.`,
+              },
+              { status: 503 },
+            );
+          }
         }
         if (request.method === "POST" && url.pathname === "/member/recheck") {
           if (request.headers.get("x-localhub-run-id") !== state.runId) {
